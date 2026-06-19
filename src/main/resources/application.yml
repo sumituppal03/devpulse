@@ -1,0 +1,36 @@
+spring:
+  application:
+    name: devpulse
+
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/devpulse}
+    username: ${SPRING_DATASOURCE_USERNAME:sumit}
+    password: ${SPRING_DATASOURCE_PASSWORD:sumit123}
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    open-in-view: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+server:
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: when-authorized
+
+logging:
+  level:
+    com.devpulse: INFO
+    org.hibernate.SQL: WARN
