@@ -34,3 +34,6 @@ logging:
   level:
     com.devpulse: INFO
     org.hibernate.SQL: WARN
+
+github:
+  token: ${GITHUB_TOKEN:}    

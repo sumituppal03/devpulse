@@ -20,8 +20,7 @@ public class TenantController {
     private final TenantService tenantService;
 
     @PostMapping("/register")
-    public ResponseEntity<TenantRegistrationResponse> register(
-            @Valid @RequestBody TenantRegistrationRequest request) {
+    public ResponseEntity<TenantRegistrationResponse> register(@Valid @RequestBody TenantRegistrationRequest request) {
         TenantRegistrationResponse response = tenantService.register(request);
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
