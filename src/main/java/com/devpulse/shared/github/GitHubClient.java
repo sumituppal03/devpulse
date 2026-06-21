@@ -47,4 +47,17 @@ public class GitHubClient {
 
         return response != null ? List.of(response) : List.of();
     }
+    /**
+      * Fetches the most recent commits by this author, regardless of date —
+      * used as a style sample so the LLM can learn how this developer actually writes.
+    */
+    public List<GitHubCommitResponse> fetchRecentCommits(String owner, String repo, String username, int limit) {
+        GitHubCommitResponse[] response = restClient.get()
+            .uri("/repos/{owner}/{repo}/commits?author={username}&per_page={limit}",
+                    owner, repo, username, limit)
+            .retrieve()
+            .body(GitHubCommitResponse[].class);
+
+        return response != null ? List.of(response) : List.of();
+    }
 }

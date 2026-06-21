@@ -25,9 +25,11 @@ public class StandupController {
             @RequestParam(required = false) String date) {
 
         LocalDate targetDate = (date != null) ? LocalDate.parse(date) : LocalDate.now().minusDays(1);
-        List<GitHubCommitResponse> commits = gitHubClient.fetchCommitsForDate(owner, repo, username, targetDate);
-        String summary = standupSummaryService.summarize(commits);
+        List<GitHubCommitResponse> todaysCommits = gitHubClient.fetchCommitsForDate(owner, repo, username, targetDate);
+        List<GitHubCommitResponse> styleSample = gitHubClient.fetchRecentCommits(owner, repo, username, 20);
 
-        return new StandupResponse(summary, commits.size(), commits);
+        String summary = standupSummaryService.summarize(todaysCommits, styleSample);
+
+        return new StandupResponse(summary, todaysCommits.size(), todaysCommits);
     }
 }

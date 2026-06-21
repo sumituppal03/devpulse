@@ -1,7 +1,10 @@
 package com.devpulse.standup;
 
 import com.devpulse.shared.github.GitHubCommitResponse;
+import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
+import dev.langchain4j.model.chat.response.ChatResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -14,35 +17,39 @@ public class StandupSummaryService {
 
     private final ChatModel chatModel;
 
-    /**
-     * Turns raw commits into a short standup summary. If there are no
-     * commits, we say so directly instead of asking the LLM to invent
-     * activity — the same no-hallucination guardrail from the original plan.
-     */
-    public String summarize(List<GitHubCommitResponse> commits) {
-        if (commits.isEmpty()) {
+    public String summarize(List<GitHubCommitResponse> todaysCommits, List<GitHubCommitResponse> styleSampleCommits) {
+        if (todaysCommits.isEmpty()) {
             return "No commits found for this date.";
         }
 
-        String commitList = commits.stream()
+        String todaysCommitList = todaysCommits.stream()
                 .map(c -> "- " + c.commit().message())
                 .collect(Collectors.joining("\n"));
 
-        String prompt = """
-                You are writing a daily standup update for a developer based on
-                their actual GitHub commits. Write exactly 3 short bullet points
-                summarizing what they worked on.
+        String styleSample = styleSampleCommits.stream()
+                .map(c -> "- " + c.commit().message())
+                .limit(15)
+                .collect(Collectors.joining("\n"));
 
-                Rules:
-                - Each bullet starts with a past-tense verb (Fixed, Added, Updated, Refactored...)
-                - Be specific about what changed — do not be vague
-                - Do NOT invent any work that is not reflected in the commits below
-                - Do NOT mention commit hashes
+        SystemMessage systemMessage = SystemMessage.from("""
+                You write daily standup updates for developers based on their GitHub commits.
+                Output ONLY 3 bullet points — no introduction, no explanation, no closing remarks,
+                nothing before or after the bullets.
+                Each bullet starts with a past-tense verb.
+                Never invent work that isn't shown in the commits provided.
+                Never mention commit hashes.
+                Match the vocabulary and tone of the style sample provided.
+                """);
 
-                Commits:
+        UserMessage userMessage = UserMessage.from("""
+                Style sample (this developer's past commit messages):
                 %s
-                """.formatted(commitList);
 
-        return chatModel.chat(prompt);
+                Today's commits to summarize:
+                %s
+                """.formatted(styleSample, todaysCommitList));
+
+        ChatResponse response = chatModel.chat(systemMessage, userMessage);
+        return response.aiMessage().text();
     }
 }
