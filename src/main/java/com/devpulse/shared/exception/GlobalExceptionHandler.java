@@ -1,5 +1,6 @@
 package com.devpulse.shared.exception;
 
+import com.devpulse.developer.TenantOwnershipException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -36,5 +37,10 @@ public class GlobalExceptionHandler {
                 Map.of()
         );
         return ResponseEntity.internalServerError().body(error);
+    }
+    @ExceptionHandler(TenantOwnershipException.class)
+    public ResponseEntity<ApiError> handleTenantOwnership(TenantOwnershipException ex) {
+        ApiError error = ApiError.of(HttpStatus.NOT_FOUND.value(), "Resource not found", Map.of());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
     }
 }
