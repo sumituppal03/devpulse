@@ -15,19 +15,19 @@ import java.util.List;
 public class StandupController {
 
     private final GitHubClient gitHubClient;
+    private final StandupSummaryService standupSummaryService;
 
-    /**
-     * Skeleton version — returns raw commits, no AI summary yet.
-     * That comes next, once we've proven this connection actually works.
-     */
     @GetMapping("/api/v1/standup/generate")
-    public List<GitHubCommitResponse> generate(
+    public StandupResponse generate(
             @RequestParam String owner,
             @RequestParam String repo,
             @RequestParam String username,
             @RequestParam(required = false) String date) {
 
         LocalDate targetDate = (date != null) ? LocalDate.parse(date) : LocalDate.now().minusDays(1);
-        return gitHubClient.fetchCommitsForDate(owner, repo, username, targetDate);
+        List<GitHubCommitResponse> commits = gitHubClient.fetchCommitsForDate(owner, repo, username, targetDate);
+        String summary = standupSummaryService.summarize(commits);
+
+        return new StandupResponse(summary, commits.size(), commits);
     }
 }
