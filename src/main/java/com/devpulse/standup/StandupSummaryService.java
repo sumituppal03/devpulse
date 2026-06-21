@@ -5,7 +5,9 @@ import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.output.TokenUsage;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -17,9 +19,13 @@ public class StandupSummaryService {
 
     private final ChatModel chatModel;
 
-    public String summarize(List<GitHubCommitResponse> todaysCommits, List<GitHubCommitResponse> styleSampleCommits) {
+    @Value("${ollama.model-name}")
+    private String modelName;
+
+    public StandupGenerationResult summarize(List<GitHubCommitResponse> todaysCommits,
+                                              List<GitHubCommitResponse> styleSampleCommits) {
         if (todaysCommits.isEmpty()) {
-            return "No commits found for this date.";
+            return new StandupGenerationResult("No commits found for this date.", modelName, null, null, 0);
         }
 
         String todaysCommitList = todaysCommits.stream()
@@ -33,8 +39,7 @@ public class StandupSummaryService {
 
         SystemMessage systemMessage = SystemMessage.from("""
                 You write daily standup updates for developers based on their GitHub commits.
-                Output ONLY 3 bullet points — no introduction, no explanation, no closing remarks,
-                nothing before or after the bullets.
+                Output ONLY 3 bullet points — no introduction, no explanation, no closing remarks.
                 Each bullet starts with a past-tense verb.
                 Never invent work that isn't shown in the commits provided.
                 Never mention commit hashes.
@@ -49,7 +54,15 @@ public class StandupSummaryService {
                 %s
                 """.formatted(styleSample, todaysCommitList));
 
+        long start = System.currentTimeMillis();
         ChatResponse response = chatModel.chat(systemMessage, userMessage);
-        return response.aiMessage().text();
+        long latencyMs = System.currentTimeMillis() - start;
+
+        String summaryText = response.aiMessage().text();
+        TokenUsage tokenUsage = response.tokenUsage();
+        Integer promptTokens = (tokenUsage != null) ? tokenUsage.inputTokenCount() : null;
+        Integer completionTokens = (tokenUsage != null) ? tokenUsage.outputTokenCount() : null;
+
+        return new StandupGenerationResult(summaryText, modelName, promptTokens, completionTokens, latencyMs);
     }
 }
