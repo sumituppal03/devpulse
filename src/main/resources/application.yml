@@ -41,3 +41,7 @@ github:
 ollama:
   base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
   model-name: ${OLLAMA_MODEL_NAME:llama3.2} 
+
+groq:
+  api-key: ${GROQ_API_KEY:}
+  model-name: ${GROQ_MODEL_NAME:llama-3.3-70b-versatile}

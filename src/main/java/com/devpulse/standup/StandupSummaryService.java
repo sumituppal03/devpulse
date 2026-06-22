@@ -1,5 +1,6 @@
 package com.devpulse.standup;
 
+import com.devpulse.shared.ai.ActiveModelInfo;
 import com.devpulse.shared.github.GitHubCommitResponse;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
@@ -18,14 +19,12 @@ import java.util.stream.Collectors;
 public class StandupSummaryService {
 
     private final ChatModel chatModel;
-
-    @Value("${ollama.model-name}")
-    private String modelName;
+    private final ActiveModelInfo activeModelInfo;
 
     public StandupGenerationResult summarize(List<GitHubCommitResponse> todaysCommits,
                                               List<GitHubCommitResponse> styleSampleCommits) {
         if (todaysCommits.isEmpty()) {
-            return new StandupGenerationResult("No commits found for this date.", modelName, null, null, 0);
+            return new StandupGenerationResult("No commits found for this date.", activeModelInfo.modelName(), null, null, 0);
         }
 
         String todaysCommitList = todaysCommits.stream()
@@ -63,6 +62,6 @@ public class StandupSummaryService {
         Integer promptTokens = (tokenUsage != null) ? tokenUsage.inputTokenCount() : null;
         Integer completionTokens = (tokenUsage != null) ? tokenUsage.outputTokenCount() : null;
 
-        return new StandupGenerationResult(summaryText, modelName, promptTokens, completionTokens, latencyMs);
+        return new StandupGenerationResult(summaryText, activeModelInfo.modelName(), promptTokens, completionTokens, latencyMs);
     }
 }
