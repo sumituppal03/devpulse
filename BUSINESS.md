@@ -184,4 +184,3 @@ Putting shared infrastructure in feature-named folders would mean duplicating au
 
 ---
 
-*This document follows the same documentation standard as [`advanced-wallet-ledger-api`](https://github.com/sumituppal03/advanced-wallet-ledger-api) — every decision documented with its reasoning, including the bugs found and fixed, because that's what an actual production engineering process looks like.*
