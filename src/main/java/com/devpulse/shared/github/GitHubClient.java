@@ -1,6 +1,5 @@
 package com.devpulse.shared.github;
 
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
@@ -8,31 +7,15 @@ import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.List;
 
-/**
- * Lives in `shared` because future features (PR context enrichment, codebase
- * indexing) will reuse this same GitHub connection — it's not specific to
- * the standup feature.
- */
 @Component
 public class GitHubClient {
 
     private final RestClient restClient;
 
-    public GitHubClient(@Value("${github.token}") String githubToken) {
-        this.restClient = RestClient.builder()
-                .baseUrl("https://api.github.com")
-                .defaultHeader("Authorization", "Bearer " + githubToken)
-                .defaultHeader("Accept", "application/vnd.github+json")
-                .defaultHeader("X-GitHub-Api-Version", "2022-11-28")
-                .build();
+    public GitHubClient(RestClient restClient) {
+        this.restClient = restClient;
     }
 
-    /**
-     * Fetches commits authored by `username` in `owner/repo`, for the given
-     * calendar date (midnight to midnight, UTC). Never throws on "no commits
-     * found" — returns an empty list, so callers can tell "no activity"
-     * apart from "something actually broke."
-     */
     public List<GitHubCommitResponse> fetchCommitsForDate(
             String owner, String repo, String username, LocalDate date) {
 
@@ -47,16 +30,13 @@ public class GitHubClient {
 
         return response != null ? List.of(response) : List.of();
     }
-    /**
-      * Fetches the most recent commits by this author, regardless of date —
-      * used as a style sample so the LLM can learn how this developer actually writes.
-    */
+
     public List<GitHubCommitResponse> fetchRecentCommits(String owner, String repo, String username, int limit) {
         GitHubCommitResponse[] response = restClient.get()
-            .uri("/repos/{owner}/{repo}/commits?author={username}&per_page={limit}",
-                    owner, repo, username, limit)
-            .retrieve()
-            .body(GitHubCommitResponse[].class);
+                .uri("/repos/{owner}/{repo}/commits?author={username}&per_page={limit}",
+                        owner, repo, username, limit)
+                .retrieve()
+                .body(GitHubCommitResponse[].class);
 
         return response != null ? List.of(response) : List.of();
     }
