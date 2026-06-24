@@ -45,3 +45,6 @@ ollama:
 groq:
   api-key: ${GROQ_API_KEY:}
   model-name: ${GROQ_MODEL_NAME:llama-3.3-70b-versatile}
+
+github:
+  webhook-secret: ${GITHUB_WEBHOOK_SECRET:}  
