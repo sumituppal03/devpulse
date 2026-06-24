@@ -6,6 +6,7 @@ import org.springframework.web.client.RestClient;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 
 @Component
 public class GitHubClient {
@@ -39,5 +40,20 @@ public class GitHubClient {
                 .body(GitHubCommitResponse[].class);
 
         return response != null ? List.of(response) : List.of();
+    }
+    public List<GitHubPullRequestFile> fetchPullRequestFiles(String owner, String repo, int prNumber) {
+        GitHubPullRequestFile[] response = restClient.get()
+                .uri("/repos/{owner}/{repo}/pulls/{number}/files", owner, repo, prNumber)
+                .retrieve()
+                .body(GitHubPullRequestFile[].class);
+
+        return response != null ? List.of(response) : List.of();
+     }
+    public GitHubCommentResponse postIssueComment(String owner, String repo, int issueNumber, String commentBody) {
+        return restClient.post()
+                .uri("/repos/{owner}/{repo}/issues/{number}/comments", owner, repo, issueNumber)
+                .body(Map.of("body", commentBody))
+                .retrieve()
+                .body(GitHubCommentResponse.class);
     }
 }

@@ -1,5 +1,9 @@
-package com.devpulse.shared.webhook;
+package com.devpulse.prcontext;
 
+import com.devpulse.shared.webhook.GitHubWebhookSignatureVerifier;
+import com.devpulse.shared.webhook.WebhookEvent;
+import com.devpulse.shared.webhook.WebhookEventRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -19,6 +23,8 @@ public class GitHubWebhookController {
 
     private final GitHubWebhookSignatureVerifier signatureVerifier;
     private final WebhookEventRepository webhookEventRepository;
+    private final PrContextEnricherService prContextEnricherService;
+    private final ObjectMapper objectMapper;
 
     @PostMapping("/webhooks/github")
     public ResponseEntity<Void> receiveGitHubWebhook(
@@ -26,10 +32,6 @@ public class GitHubWebhookController {
             @RequestHeader("X-Hub-Signature-256") String signature,
             @RequestHeader("X-GitHub-Event") String eventType) throws IOException {
 
-        // Reading the raw stream ourselves — binding @RequestBody directly to
-        // a String can misbehave when Content-Type is application/json, since
-        // Jackson may try to parse it as a quoted JSON string rather than raw
-        // bytes. This guarantees we get the EXACT bytes GitHub actually signed.
         String rawPayload = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
 
         if (!signatureVerifier.isValid(rawPayload, signature)) {
@@ -37,9 +39,28 @@ public class GitHubWebhookController {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }
 
-        WebhookEvent event = WebhookEvent.create("GITHUB", eventType, rawPayload);
-        webhookEventRepository.save(event);
+        WebhookEvent event = webhookEventRepository.save(WebhookEvent.create("GITHUB", eventType, rawPayload));
         log.info("Logged GitHub webhook event: {} (id={})", eventType, event.getId());
+
+        if ("pull_request".equals(eventType)) {
+            try {
+                GitHubPullRequestWebhookPayload payload =
+                        objectMapper.readValue(rawPayload, GitHubPullRequestWebhookPayload.class);
+
+                if ("opened".equals(payload.action()) || "reopened".equals(payload.action())) {
+                    prContextEnricherService.enrich(
+                            event.getId(),
+                            payload.repository().owner().login(),
+                            payload.repository().name(),
+                            payload.pullRequest().number(),
+                            payload.pullRequest().title(),
+                            payload.pullRequest().body()
+                    );
+                }
+            } catch (Exception e) {
+                log.error("Failed to parse pull_request webhook payload", e);
+            }
+        }
 
         return ResponseEntity.ok().build();
     }
