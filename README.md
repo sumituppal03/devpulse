@@ -49,6 +49,7 @@ Real commits today →  3 grounded bullet points, written in the developer's own
 | AI provider (dev) | Ollama + Llama 3.2 | Free, fully local, zero data leaves the machine |
 | AI provider (prod) | Groq + Llama 3.3 70B | OpenAI-compatible API, ~30x faster than local CPU inference |
 | Auth | Spring Security + custom split-key API auth | BCrypt-safe lookup — see [`BUSINESS.md`](./BUSINESS.md) for why |
+| API Docs | springdoc-openapi + Swagger UI | Interactive, testable docs — not just a README wall of text |
 | Migrations | Flyway | Every schema change versioned, auditable, reproducible |
 | Container | Multi-stage Docker (JDK → JRE) | Minimal runtime image, no build tools shipped |
 | Testing | JUnit 5, Mockito, AssertJ, MockRestServiceServer | Real unit tests, zero live network calls |
@@ -56,66 +57,85 @@ Real commits today →  3 grounded bullet points, written in the developer's own
 
 ---
 
+## Try It Yourself — Interactive API Docs (Recommended Starting Point)
+
+Rather than copying static examples below, the fastest way to actually explore this API is the live Swagger UI:
+
+**`https://devpulse-ohby.onrender.com/swagger-ui.html`**
+
+It documents every endpoint with real request/response schemas, and includes an **Authorize** button — register a tenant via the UI itself, paste your generated key into Authorize, and call every other endpoint directly in the browser. No `curl`, no Postman setup required.
+
+---
+
 ## API Reference
 
-### Tenant Registration (Public)
+> **Every ID shown below is a placeholder for illustration only.** There is no shared, fixed, or "demo" ID built into this API — each tenant generates its own unique `apiKey` and `developerId` by calling these endpoints themselves, exactly as shown.
+
+### 1. Register a Tenant (Public)
 
 ```http
 POST /api/v1/tenants/register
-{ "name": "Acme Corp" }
+{ "name": "Your Company Name" }
 ```
 
+**Response shape:**
 ```json
 {
-  "tenantId": "ec36a148-311d-4d68-acd6-d4c85f34f2f9",
-  "name": "Acme Corp",
-  "apiKey": "dp_live_R9VNrMEzjTEi.1OaWlNnY2oQPBgEEw1P-ecpv8ZXsbIGomO67z7cnbNE",
+  "tenantId": "<a-new-uuid-generated-for-you>",
+  "name": "Your Company Name",
+  "apiKey": "dp_live_<unique-to-you>.<unique-to-you>",
   "warning": "Save this API key now. It will not be shown again."
 }
 ```
 
-> The API key is shown exactly once. Only its hash is ever stored. See `BUSINESS.md` for the full design rationale.
+**Save the `apiKey` from your own response right now** — it is shown exactly once and never stored anywhere, by design. You'll use it as a Bearer token for every call below.
 
 ---
 
-### Developer Registration (Authenticated)
+### 2. Register a Developer (Authenticated)
 
 ```http
 POST /api/v1/developers
-Authorization: Bearer dp_live_...
-{ "githubUsername": "sumituppal03" }
+Authorization: Bearer <your-own-apiKey-from-step-1>
+{ "githubUsername": "<the-github-username-you-want-to-track>" }
 ```
 
+**Response shape:**
 ```json
 {
-  "developerId": "277c6591-1fad-4322-adb2-14f347b9fbd3",
-  "githubUsername": "sumituppal03",
+  "developerId": "<a-new-uuid-generated-for-you>",
+  "githubUsername": "<the-username-you-provided>",
   "timezone": "UTC"
 }
 ```
 
+**Save the `developerId` from your own response** — you'll need it for the next call.
+
 ---
 
-### Generate a Standup (Authenticated, Tenant-Scoped)
+### 3. Generate a Standup (Authenticated, Tenant-Scoped)
 
 ```http
-GET /api/v1/standup/generate?developerId={id}&owner={owner}&repo={repo}&date={optional}
-Authorization: Bearer dp_live_...
+GET /api/v1/standup/generate?developerId=<your-own-developerId-from-step-2>&owner=<github-org-or-username>&repo=<repo-name>&date=<optional-YYYY-MM-DD>
+Authorization: Bearer <your-own-apiKey-from-step-1>
 ```
 
+**Response shape:**
 ```json
 {
-  "summary": "* Implemented persistence of standups and added LLM call audit logging\n* Added developer registration with tenant ownership verification\n* Separated system and user messages to eliminate preamble in AI summary",
+  "summary": "* [an AI-generated bullet reflecting a REAL commit]\n* [another real, grounded bullet]\n* [a third real, grounded bullet]",
   "commitCount": 4,
-  "commits": [ "...raw commit objects for transparency..." ]
+  "commits": [ "...raw commit objects, included for transparency..." ]
 }
 ```
 
-If `developerId` doesn't exist, or belongs to a **different** tenant, this returns a clean `404` — not a `403`, not a leaked result. See [`BUSINESS.md`](./BUSINESS.md) for why that distinction matters.
+**Important behavior to understand:**
+- `developerId` must belong to a developer **you registered under your own tenant** in step 2. A `developerId` belonging to a different tenant — or one that doesn't exist at all — returns a clean `404`, not a `403` and not a leaked result. See [`BUSINESS.md`](./BUSINESS.md) for why that distinction is intentional.
+- If the specified date has zero commits, `summary` will simply say `"No commits found for this date."` — the AI is never invoked when there's nothing real to summarize.
 
 ---
 
-## Quick Start
+## Quick Start (Run It Yourself)
 
 ### Option 1: Docker Compose (local development, Ollama)
 
@@ -133,7 +153,7 @@ export GITHUB_TOKEN=your_github_pat
 ./mvnw spring-boot:run
 ```
 
-API is running at `http://localhost:8080`
+API runs at `http://localhost:8080` — Swagger UI at `http://localhost:8080/swagger-ui.html`.
 
 ---
 
@@ -269,6 +289,8 @@ Full rationale for every architectural choice — the split-key auth design, why
 API is deployed at: **`https://devpulse-ohby.onrender.com`**
 
 > Free tier — allow 30-60 seconds on the first request if the instance has spun down.
+
+Interactive API docs: **`https://devpulse-ohby.onrender.com/swagger-ui.html`**
 
 Health check: **`https://devpulse-ohby.onrender.com/actuator/health`**
 

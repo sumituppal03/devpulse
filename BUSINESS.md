@@ -183,4 +183,3 @@ Putting shared infrastructure in feature-named folders would mean duplicating au
 | Profile-scoped `ActiveModelInfo` bean | Hardcoded `@Value` model name field | Fixed a real bug where the audit log misreported which AI provider actually ran |
 
 ---
-
