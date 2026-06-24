@@ -36,7 +36,8 @@ logging:
     org.hibernate.SQL: WARN
 
 github:
-  token: ${GITHUB_TOKEN:}    
+  token: ${GITHUB_TOKEN:}  
+  webhook-secret: ${GITHUB_WEBHOOK_SECRET:}  
 
 ollama:
   base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
@@ -45,6 +46,4 @@ ollama:
 groq:
   api-key: ${GROQ_API_KEY:}
   model-name: ${GROQ_MODEL_NAME:llama-3.3-70b-versatile}
-
-github:
-  webhook-secret: ${GITHUB_WEBHOOK_SECRET:}  
+    
