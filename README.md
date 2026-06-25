@@ -1,6 +1,6 @@
 # ⚡ DevPulse
 
-> An AI-powered engineering intelligence platform that turns a developer's real GitHub activity into accurate, grounded standup summaries — multi-tenant, dual-provider AI (local or cloud), with a real audit trail tracking exactly what every LLM call cost in time and tokens.
+> An AI-powered engineering intelligence platform with two distinct features: an authenticated, multi-tenant standup generator grounded in real GitHub activity, and a webhook-driven PR context enricher that posts AI-generated explanations directly onto pull requests. Dual-provider AI (local or cloud), with a real audit trail tracking exactly what every LLM call cost in time and tokens.
 
 [![Java](https://img.shields.io/badge/Java-25-orange?logo=openjdk)](https://openjdk.org/)
 [![Spring Boot](https://img.shields.io/badge/Spring_Boot-3.5.15-brightgreen?logo=spring)](https://spring.io/projects/spring-boot)
@@ -12,29 +12,40 @@
 
 ## The Problem
 
-Every developer spends 10-15 minutes before standup manually reconstructing what they did yesterday — scanning commits, half-remembering tickets, composing three bullet points nobody will remember by lunch. AI "wrapper" tools that summarize text exist everywhere, but most have no real data moat: swap the prompt, swap the product.
+Engineering teams lose real time to two specific, mechanical daily tasks:
 
-DevPulse is built differently — it's grounded in a tenant's **actual GitHub history**, not a blank chat window, and it refuses to invent activity that didn't happen.
+**Standup prep** — 10-15 minutes per developer reconstructing yesterday's work from memory.
+**PR review context** — reviewers asking "what ticket is this for?" and "why this approach?" before review can even begin.
+
+DevPulse automates both, grounded in real GitHub data — not a blank chat window guessing at context it was never given.
 
 ```
 No commits today  →  "No commits found for this date." (the LLM is never even called)
-Real commits today →  3 grounded bullet points, written in the developer's own style
+A PR opens         →  An AI-generated context comment appears within seconds, automatically
 ```
 
 ---
 
-## What Makes This Different
+## Two Features, Two Architectural Patterns
 
-| Approach | Data grounding | Hallucination risk | Cost/latency tradeoff |
-|---|---|---|---|
-| Generic ChatGPT wrapper | None — whatever you type | High | Single provider, no choice |
-| Most "AI standup" tools | Vague, often just a text box | Medium | Locked to one vendor |
-| **DevPulse** | Real commits, real style sample | **Near-zero — empty input never reaches the LLM** | **Swap providers via one config flag** |
+| | Standup Generator | PR Context Enricher |
+|---|---|---|
+| **Trigger** | Authenticated API call (pull) | GitHub webhook (push) |
+| **Auth model** | Per-tenant API key | HMAC-SHA256 signature verification |
+| **Tenancy** | Fully multi-tenant, verified ownership | Single shared repository — see [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the honest gap |
+| **Processing** | Synchronous | Asynchronous (`@Async`), idempotent |
+| **Output** | JSON response | A real comment posted to the PR |
 
-**Two architectural guarantees:**
+Building both deliberately, on their own terms, demonstrates two genuinely different integration patterns rather than forcing one shape onto both.
 
-1. **No-hallucination guardrail** — if there are zero commits for a date, the LLM is never called at all. This is enforced in code and verified by a unit test, not just a prompt instruction.
-2. **Dual-provider AI** — the exact same `ChatModel` interface runs on free, private, local Ollama for development, or fast, cloud-hosted Groq for production. One Spring profile flag switches it. No code changes.
+---
+
+## What Makes This Different From a Generic AI Wrapper
+
+1. **No-hallucination guardrail** — if there's nothing real to summarize, the LLM is never called at all. Enforced by tests, not just a prompt instruction.
+2. **Dual-provider AI** — the same `ChatModel` interface runs on free, local Ollama for development, or fast, cloud-hosted Groq for production. One Spring profile flag switches it.
+3. **Idempotent webhook handling** — a duplicate GitHub webhook delivery (a documented, real platform behavior) never double-posts a comment or double-calls the LLM.
+4. **Honest architectural self-assessment** — see [`ARCHITECTURE.md`](./ARCHITECTURE.md) for what's genuinely production-grade versus intentionally simplified for this project's scale.
 
 ---
 
@@ -43,33 +54,32 @@ Real commits today →  3 grounded bullet points, written in the developer's own
 | Layer | Technology | Why |
 |---|---|---|
 | Runtime | Java 25 + Spring Boot 3.5.15 | Latest LTS, modern records, production-hardened |
-| Database (prod) | PostgreSQL via Neon | Free tier with **no expiry** — unlike most free-tier Postgres offerings |
-| Database (local) | PostgreSQL via Docker Compose | Fast local spin-up, identical engine to production |
+| Database (prod) | PostgreSQL via Neon | Free tier with **no expiry** |
+| Database (local) | PostgreSQL via Docker Compose | Identical engine to production |
 | AI orchestration | LangChain4j 1.16.3 | Mature RAG/chat abstractions, rare in the Java ecosystem |
 | AI provider (dev) | Ollama + Llama 3.2 | Free, fully local, zero data leaves the machine |
 | AI provider (prod) | Groq + Llama 3.3 70B | OpenAI-compatible API, ~30x faster than local CPU inference |
-| Auth | Spring Security + custom split-key API auth | BCrypt-safe lookup — see [`BUSINESS.md`](./BUSINESS.md) for why |
-| API Docs | springdoc-openapi + Swagger UI | Interactive, testable docs — not just a README wall of text |
-| Migrations | Flyway | Every schema change versioned, auditable, reproducible |
-| Container | Multi-stage Docker (JDK → JRE) | Minimal runtime image, no build tools shipped |
+| Auth (API) | Spring Security + split-key API auth | BCrypt-safe lookup — see [`BUSINESS.md`](./BUSINESS.md) |
+| Auth (webhook) | HMAC-SHA256 signature verification | Proves a webhook genuinely came from GitHub |
+| API Docs | springdoc-openapi + Swagger UI | Interactive, testable docs |
+| Migrations | Flyway | Every schema change versioned and auditable |
+| Container | Multi-stage Docker (JDK → JRE) | Minimal runtime image |
 | Testing | JUnit 5, Mockito, AssertJ, MockRestServiceServer | Real unit tests, zero live network calls |
 | Deployment | Render | Live at `devpulse-ohby.onrender.com` |
 
 ---
 
-## Try It Yourself — Interactive API Docs (Recommended Starting Point)
-
-Rather than copying static examples below, the fastest way to actually explore this API is the live Swagger UI:
+## Try It Yourself — Interactive API Docs
 
 **`https://devpulse-ohby.onrender.com/swagger-ui.html`**
 
-It documents every endpoint with real request/response schemas, and includes an **Authorize** button — register a tenant via the UI itself, paste your generated key into Authorize, and call every other endpoint directly in the browser. No `curl`, no Postman setup required.
+Every authenticated endpoint documented with real schemas, plus an **Authorize** button — register a tenant, paste your generated key, and call protected endpoints directly in the browser.
 
 ---
 
 ## API Reference
 
-> **Every ID shown below is a placeholder for illustration only.** There is no shared, fixed, or "demo" ID built into this API — each tenant generates its own unique `apiKey` and `developerId` by calling these endpoints themselves, exactly as shown.
+> **Every ID and secret shown below is a placeholder for illustration only.** There is no shared, fixed, or "demo" credential built into this API — each tenant generates its own by calling these endpoints themselves.
 
 ### 1. Register a Tenant (Public)
 
@@ -78,7 +88,6 @@ POST /api/v1/tenants/register
 { "name": "Your Company Name" }
 ```
 
-**Response shape:**
 ```json
 {
   "tenantId": "<a-new-uuid-generated-for-you>",
@@ -88,10 +97,6 @@ POST /api/v1/tenants/register
 }
 ```
 
-**Save the `apiKey` from your own response right now** — it is shown exactly once and never stored anywhere, by design. You'll use it as a Bearer token for every call below.
-
----
-
 ### 2. Register a Developer (Authenticated)
 
 ```http
@@ -100,38 +105,24 @@ Authorization: Bearer <your-own-apiKey-from-step-1>
 { "githubUsername": "<the-github-username-you-want-to-track>" }
 ```
 
-**Response shape:**
-```json
-{
-  "developerId": "<a-new-uuid-generated-for-you>",
-  "githubUsername": "<the-username-you-provided>",
-  "timezone": "UTC"
-}
-```
-
-**Save the `developerId` from your own response** — you'll need it for the next call.
-
----
-
 ### 3. Generate a Standup (Authenticated, Tenant-Scoped)
 
 ```http
-GET /api/v1/standup/generate?developerId=<your-own-developerId-from-step-2>&owner=<github-org-or-username>&repo=<repo-name>&date=<optional-YYYY-MM-DD>
-Authorization: Bearer <your-own-apiKey-from-step-1>
+GET /api/v1/standup/generate?developerId=<your-own-developerId>&owner=<github-org>&repo=<repo-name>&date=<optional-YYYY-MM-DD>
+Authorization: Bearer <your-own-apiKey>
 ```
 
-**Response shape:**
-```json
-{
-  "summary": "* [an AI-generated bullet reflecting a REAL commit]\n* [another real, grounded bullet]\n* [a third real, grounded bullet]",
-  "commitCount": 4,
-  "commits": [ "...raw commit objects, included for transparency..." ]
-}
+A `developerId` belonging to a different tenant — or one that doesn't exist — returns a clean `404`, never a leaked result.
+
+### 4. PR Context Enrichment (Webhook-Triggered — Not Called Directly)
+
+This feature has no endpoint you call yourself. Instead, configure a webhook on a GitHub repository pointing at:
+
+```
+POST https://devpulse-ohby.onrender.com/webhooks/github
 ```
 
-**Important behavior to understand:**
-- `developerId` must belong to a developer **you registered under your own tenant** in step 2. A `developerId` belonging to a different tenant — or one that doesn't exist at all — returns a clean `404`, not a `403` and not a leaked result. See [`BUSINESS.md`](./BUSINESS.md) for why that distinction is intentional.
-- If the specified date has zero commits, `summary` will simply say `"No commits found for this date."` — the AI is never invoked when there's nothing real to summarize.
+with content type `application/json`, the **Pull requests** event selected, and a secret you choose yourself (it must match the `GITHUB_WEBHOOK_SECRET` environment variable on whichever server you're running). Opening a PR on that repository will, within seconds, produce a real comment on the PR itself — no further action needed.
 
 ---
 
@@ -143,30 +134,27 @@ Authorization: Bearer <your-own-apiKey-from-step-1>
 git clone https://github.com/sumituppal03/devpulse.git
 cd devpulse
 
-docker-compose up -d        # starts PostgreSQL
+docker-compose up -d
 
 # Install Ollama separately: https://ollama.com
 ollama pull llama3.2
 
-export GITHUB_TOKEN=your_github_pat
+export GITHUB_TOKEN=<your-own-github-pat>
+export GITHUB_WEBHOOK_SECRET=<a-secret-you-invent-yourself>
 
 ./mvnw spring-boot:run
 ```
 
 API runs at `http://localhost:8080` — Swagger UI at `http://localhost:8080/swagger-ui.html`.
 
----
+> Note: testing the webhook feature requires a publicly reachable URL (e.g., your deployed instance, or a tunneling tool like ngrok pointed at localhost) — GitHub cannot reach `localhost` directly.
 
 ### Option 2: Run Against Groq Instead of Ollama
 
 ```bash
-export GROQ_API_KEY=your_groq_key
+export GROQ_API_KEY=<your-own-groq-key>
 ./mvnw spring-boot:run "-Dspring-boot.run.profiles=prod"
 ```
-
-Same codebase, same `ChatModel` interface — just a different bean activated by the `prod` Spring profile.
-
----
 
 ### Environment Variables
 
@@ -176,6 +164,7 @@ Same codebase, same `ChatModel` interface — just a different bean activated by
 | `SPRING_DATASOURCE_USERNAME` | Database user | ✅ |
 | `SPRING_DATASOURCE_PASSWORD` | Database password | ✅ |
 | `GITHUB_TOKEN` | GitHub PAT with `repo` scope | ✅ |
+| `GITHUB_WEBHOOK_SECRET` | A secret you invent, matching your GitHub webhook config | ✅ (for PR Context) |
 | `GROQ_API_KEY` | Groq Cloud API key | Only if `prod` profile active |
 | `SPRING_PROFILES_ACTIVE` | `prod` to use Groq instead of Ollama | Optional |
 
@@ -190,109 +179,111 @@ Same codebase, same `ChatModel` interface — just a different bean activated by
 ```
 
 ```
-Tests run: 6, Failures: 0, Errors: 0
+Tests run: 14, Failures: 0, Errors: 0
 ```
 
 **What's actually being verified:**
-- `TenantServiceTest` — the plaintext API key is returned exactly once and never persisted
-- `GitHubClientTest` — GitHub's JSON is parsed correctly; "no commits" returns an empty list, never `null`
-- `StandupSummaryServiceTest` — **the LLM is never called when there are zero commits** (the no-hallucination guarantee, enforced by a real assertion, not a comment)
-- `DevpulseApplicationTests` — the full Spring context boots correctly, every bean wires together
+- API key security: plaintext keys returned exactly once, never persisted
+- GitHub JSON parsing: empty results return an empty list, never `null`
+- **The no-hallucination guarantee**: the LLM is never called when there's nothing real to summarize
+- **Webhook signature verification**: tampered payloads and wrong secrets are correctly rejected
+- **PR enrichment idempotency**: a duplicate webhook delivery never double-posts or double-calls the LLM
+- **Failure handling**: a GitHub API failure mid-enrichment is captured in the audit trail, not silently lost
 
 ---
 
 ## Architecture
 
 ```
-Client Request
-      │
-      ▼
-┌─────────────────────┐
-│ ApiKeyAuthentication │  ← Bearer token parsed, tenant looked up by keyId,
-│       Filter         │     secret verified via BCrypt
-└──────────┬───────────┘
-           │
-           ▼
-┌─────────────────────┐
-│  StandupController   │  ← Verifies developerId belongs to THIS tenant
-└──────────┬───────────┘     (404 if not — never leaks existence)
-           │
-     ┌─────┴─────┐
-     ▼           ▼
-┌─────────┐  ┌──────────────────┐
-│ GitHub  │  │ StandupSummary    │
-│ Client  │  │ Service           │
-└─────────┘  └────────┬──────────┘
-                       │
-              ┌────────┴────────┐
-              ▼                 ▼
-        ┌──────────┐      ┌──────────┐
-        │  Ollama   │      │   Groq   │
-        │  (!prod)  │      │  (prod)  │
-        └──────────┘      └──────────┘
-                       │
-                       ▼
-              ┌─────────────────┐
-              │  PostgreSQL      │
-              │  standups +      │
-              │  llm_calls audit │
-              └─────────────────┘
+                    ┌─────────────────────────┐
+                    │   Authenticated Client    │
+                    └────────────┬─────────────┘
+                                 │ Bearer token
+                                 ▼
+                    ┌─────────────────────────┐
+                    │ ApiKeyAuthenticationFilter│
+                    └────────────┬─────────────┘
+                                 ▼
+                    ┌─────────────────────────┐
+                    │   StandupController      │  ← tenant ownership verified
+                    └────────────┬─────────────┘
+                                 ▼
+                  GitHubClient ──────► Ollama / Groq ──────► standups + llm_calls
+
+
+                    ┌─────────────────────────┐
+                    │      GitHub Webhook       │
+                    └────────────┬─────────────┘
+                                 │ HMAC-SHA256 signature
+                                 ▼
+                    ┌─────────────────────────┐
+                    │  GitHubWebhookController  │  ← signature verified, event logged
+                    └────────────┬─────────────┘
+                                 │ @Async
+                                 ▼
+                    ┌─────────────────────────┐
+                    │ PrContextEnricherService  │  ← idempotency check first
+                    └────────────┬─────────────┘
+                                 ▼
+                  GitHubClient ──────► Ollama / Groq ──────► pr_enrichments + llm_calls
+                                 │
+                                 ▼
+                      Comment posted to GitHub PR
 ```
+
+For the honest assessment of where these two flows diverge architecturally (and why), see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ---
 
 ## Real Measured Performance
 
-From the `llm_calls` audit table — not estimates:
+| Provider | Model | Typical Latency |
+|---|---|---|
+| Ollama (local CPU) | llama3.2 | ~44.7 seconds |
+| Groq (cloud) | llama-3.3-70b-versatile | ~1.0-1.5 seconds |
 
-| Provider | Model | Typical Latency | Notes |
-|---|---|---|---|
-| Ollama (local CPU) | llama3.2 | ~44.7 seconds | No GPU, runs entirely on a laptop CPU |
-| Groq (cloud) | llama-3.3-70b-versatile | ~1.0-1.5 seconds | ~30x faster, costs nothing on free tier |
-
-This is the real, measured tradeoff between privacy/cost and speed — documented honestly because it's a genuine architectural decision, not a flaw.
+Measured from the `llm_calls` audit table — not estimates.
 
 ---
 
-## Design Decisions
+## Design Decisions & Architecture
 
-Full rationale for every architectural choice — the split-key auth design, why tenant ownership returns 404 not 403, why Groq integration uses `langchain4j-open-ai` instead of a dedicated module, why `GitHubClient` and the AI config live in `shared/` — is documented in [`BUSINESS.md`](./BUSINESS.md).
+- [`BUSINESS.md`](./BUSINESS.md) — the reasoning behind every individual design decision
+- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — an honest assessment of what's production-grade versus intentionally simplified, including the one significant tenancy gap between the two features
 
 ---
 
 ## Known Limitations
 
-**Render free tier cold start** — spins down after 15 minutes idle; first request after that takes 30-60 seconds.
+**No repository-to-tenant mapping** — PR Context Enrichment runs on a single shared GitHub repository with no tenant scoping. This is the most significant honest gap in the system; full reasoning in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
-**Neon free tier storage** — 0.5 GB per project. Ample for this demo's scale, not for real production volume.
+**No message queue for async processing** — webhook enrichment relies on Spring's in-memory `@Async`, not a durable queue. A crash mid-processing loses that specific job.
 
-**Local Ollama latency** — CPU-only inference takes ~45 seconds per call. Acceptable for development, not for a real-time product experience.
+**No rate limiting** — neither feature currently throttles repeated calls from a single source.
 
-**No event-driven features yet** — standup generation is request-triggered (`GET`), not webhook-driven. PR context enrichment (originally planned) would require this.
+**Render free tier cold start** — 30-60 second delay after 15 minutes of inactivity.
 
-**No rate limiting yet** — a single tenant could call the AI endpoint repeatedly with no throttling. Planned for a future iteration.
+**No Linear/Jira/Slack integration** — PR context is generated from the PR's own title, description, and diff only, not external ticket or discussion systems. Originally scoped, deliberately deferred.
 
 ---
 
 ## Roadmap
 
+- [ ] Repository-to-tenant mapping via GitHub App installation (replacing the single shared PAT model)
 - [ ] Per-tenant rate limiting on AI endpoints
-- [ ] PR Context Enricher — webhook-driven, posts business context to GitHub PRs automatically
+- [ ] Durable queue (SQS/RabbitMQ) for webhook processing reliability
 - [ ] Codebase Q&A via RAG (PGVector) — natural language questions answered with file citations
-- [ ] Standup edit-distance tracking — measure how much developers actually edit AI drafts
-- [ ] Slack integration for posting finalized standups directly
+- [ ] Linear/Jira ticket context integration for PR enrichment
 
 ---
 
 ## Live Demo
 
-API is deployed at: **`https://devpulse-ohby.onrender.com`**
+API: **`https://devpulse-ohby.onrender.com`**
+Swagger UI: **`https://devpulse-ohby.onrender.com/swagger-ui.html`**
+Health check: **`https://devpulse-ohby.onrender.com/actuator/health`**
 
 > Free tier — allow 30-60 seconds on the first request if the instance has spun down.
-
-Interactive API docs: **`https://devpulse-ohby.onrender.com/swagger-ui.html`**
-
-Health check: **`https://devpulse-ohby.onrender.com/actuator/health`**
 
 ---
 
@@ -303,4 +294,4 @@ Health check: **`https://devpulse-ohby.onrender.com/actuator/health`**
 
 ---
 
-*Built to production standard, including the bugs found and fixed along the way — see [`BUSINESS.md`](./BUSINESS.md) for the full decision log.*
+*Built to production standard, including the bugs found and fixed, and the gaps stated honestly rather than hidden. See [`BUSINESS.md`](./BUSINESS.md) and [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full reasoning.*

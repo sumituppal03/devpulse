@@ -1,159 +1,114 @@
 # 💼 Business Context & Design Decisions
 
-> Why DevPulse exists, who it's for, and the reasoning behind every non-obvious architectural choice — including the bugs found and fixed during development, which are as instructive as the decisions themselves.
+> Why DevPulse exists, who it's for, and the reasoning behind every non-obvious architectural choice across both features — including the bugs found and fixed during development, and the deliberate scoping decisions that kept this buildable as a single-person project.
 
 ---
 
 ## The Problem
 
-Engineering teams lose real time to mechanical, low-value work every single day:
+**Standup preparation.** A developer spends 10-15 minutes before standup manually reconstructing yesterday's work. For a 6-person team, that's roughly 90 minutes of collective daily time on something purely mechanical.
 
-**Standup preparation.** A developer spends 10-15 minutes before standup manually reconstructing yesterday's work — scanning commits, half-remembering ticket numbers, composing three bullet points. For a 6-person team, that's roughly 90 minutes of collective time spent daily on something purely mechanical.
+**PR review context.** Reviewers spend the first minutes of every review asking "what's this for?" and "why this approach?" — because the PR's description alone rarely explains the reasoning, and existing AI code review tools analyze the diff itself with zero awareness of business context.
 
-**Generic AI tools don't solve this well.** A blank ChatGPT window has no idea what a developer actually did. It either produces generic filler or requires the developer to type out their own summary anyway — defeating the purpose.
-
-DevPulse is grounded in a tenant's **real GitHub history**. It doesn't ask "what did you do?" — it already knows, and it refuses to guess when it doesn't.
+Both are solved here the same way: ground the AI in real data the system already has access to, and refuse to guess when it doesn't.
 
 ---
 
-## Core Design Decisions & Their Business Justifications
+## Feature 1: Standup Generator — Design Decisions
 
 ### 1. Split-Key API Authentication (`keyId` + `secret`)
 
-**The problem this solves:** BCrypt is intentionally designed to produce a *different* hash every time, even for the same input (it embeds a random salt). That's exactly what makes it secure against rainbow-table attacks — but it also means there's no way to write `SELECT * FROM tenants WHERE api_key_hash = bcrypt(candidate)`, because you can never compute the matching hash to search for.
-
-**The fix:** every API key is structured as `dp_live_{keyId}.{secret}`.
-- `keyId` — short, stored in **plaintext**, indexed for fast lookup. Knowing it alone proves nothing.
-- `secret` — the real credential. Only its BCrypt hash is ever stored.
-
-Authentication becomes two fast steps: look up the one row by `keyId` (instant, indexed), then BCrypt-verify just the `secret` against that row's hash — never against the whole table. This is the same pattern Stripe and GitHub use for their own API keys.
-
----
+BCrypt intentionally produces a different hash every time, even for identical input — that's what makes it secure, but it also means you can't query a database by a BCrypt hash directly. The fix: every API key is `dp_live_{keyId}.{secret}` — `keyId` stored in plaintext for fast indexed lookup, `secret`'s hash stored for verification. Two fast steps instead of an impossible query. Same pattern Stripe and GitHub use.
 
 ### 2. Tenant Ownership Returns `404`, Not `403`
 
-**The problem:** when `StandupController` receives a `developerId`, it must verify that developer actually belongs to the authenticated tenant — not some other tenant entirely. The naive approach returns `403 Forbidden` when the ID exists but belongs to someone else.
+A `403` confirms to a caller that a given ID is real, even if they can't access it. A `404` reveals nothing — a developer owned by another tenant looks identical to one that never existed. This was a real gap found and fixed mid-development: the original endpoint took a raw `username` parameter with zero tenant scoping at all.
 
-**Why that's wrong:** a `403` confirms to an attacker that the ID is real — they've just learned a valid UUID exists, even if they can't use it. A `404 Not Found` reveals nothing: a real developer owned by another tenant looks **identical** to an ID that never existed at all. `TenantOwnershipException` is deliberately mapped to `404` for exactly this reason.
+### 3. Dual-Provider AI via Spring Profiles
 
-This was a real gap found mid-development — the original `StandupController` took a raw `username` query parameter with **zero tenant scoping**, meaning any authenticated tenant could request standups for any GitHub user at all. The fix (developer registration + ownership verification) closed this before it shipped, and a negative test (`developerId` that doesn't exist → confirmed `404`) proves it.
+Local Ollama (free, private, ~45s on CPU) and cloud Groq (fast, ~1-1.5s, measured) both satisfy the same `ChatModel` interface, switched by one profile flag. LangChain4j has no dedicated Groq module yet — a feature request has been open since 2024 — so this uses `langchain4j-open-ai` pointed at Groq's OpenAI-compatible endpoint, the standard current workaround.
 
----
+### 4. The No-Hallucination Guardrail Is Code, Not a Prompt Instruction
 
-### 3. Dual-Provider AI: Ollama for Development, Groq for Production
-
-**The problem:** local LLMs (Ollama) are free and fully private, but slow on CPU-only hardware (~45 seconds per call, measured). Cloud providers (Groq) are dramatically faster (~1-1.5 seconds, measured) but require sending data off the local machine and depend on a paid-tier-adjacent free quota.
-
-**The decision:** both options stay available, switched by a single Spring profile flag — `ChatModelConfig` defines two `@Profile`-scoped beans (`!prod` → Ollama, `prod` → Groq), both satisfying the exact same `ChatModel` interface. `StandupSummaryService` never knows or cares which one is active.
-
-**The technical detail that matters:** LangChain4j has no dedicated Groq integration module — a feature request for native Groq support has been open since 2024. Since Groq's API is OpenAI-compatible, the correct current workaround is reusing `langchain4j-open-ai` and pointing its `baseUrl` at `https://api.groq.com/openai/v1` instead of OpenAI's endpoint. This is the standard, documented approach used across the industry for Groq integrations — not a hack specific to this project.
-
----
-
-### 4. The No-Hallucination Guardrail Is Code, Not Just a Prompt Instruction
-
-**The problem:** an LLM asked to "summarize today's work" will often invent plausible-sounding activity even when given nothing to summarize.
-
-**The fix:** `StandupSummaryService.summarize()` checks the commit list **before** ever constructing a prompt:
-```java
-if (todaysCommits.isEmpty()) {
-    return new StandupGenerationResult("No commits found for this date.", ...);
-}
-```
-
-This isn't a "please don't hallucinate" instruction hoping the model complies — it's a code path that makes the LLM call structurally impossible when there's nothing real to summarize. `StandupSummaryServiceTest` enforces this directly: `verify(chatModel, never()).chat(...)` — if this guarantee ever regresses, the test suite fails immediately, not silently in production.
-
----
+Empty commit list → early return, LLM never called. Verified directly: `verify(chatModel, never()).chat(...)`. If this regresses, the test suite fails immediately rather than silently in production.
 
 ### 5. System/User Message Separation (A Bug Found and Fixed)
 
-**What happened:** the first working version of the prompt combined rules and data into a single block of text sent as one message. The model would respond with `"Here are three standup bullet points:"` before the actual bullets — violating the explicit instruction to output *only* three bullets.
+The first prompt version combined rules and data in one block; the model added an unwanted preamble ("Here are three bullet points:") despite explicit instructions not to. Splitting into a `SystemMessage` (rules) and `UserMessage` (data) gave the model a clearer structural signal and eliminated the preamble — confirmed by direct before/after comparison.
 
-**Why it happened:** cramming everything into one undifferentiated block gives a model room to "narrate" rather than strictly comply, since nothing distinguishes instruction from content.
+### 6. The Audit Log Bug — Reporting the Wrong Model Name
 
-**The fix:** splitting into a `SystemMessage` (rules only) and a `UserMessage` (style sample + actual commits) gave the model a much stronger structural signal that the system message is binding instruction, not conversational content. The preamble disappeared immediately after this change — verified by direct before/after comparison during development.
-
----
-
-### 6. Style-Matching via a Commit History Sample
-
-**The idea:** rather than just summarizing today's commits in a generic voice, `fetchRecentCommits()` pulls a sample of the developer's past commit messages, and the prompt explicitly asks the model to study that sample's vocabulary and tone before writing today's summary.
-
-**Honest limitation:** this works best on repositories with substantial commit history. On a 3-day-old repository, there isn't much distinctive personal voice yet for the model to detect — the feature is designed to improve naturally as real commit history accumulates over weeks, not something achievable through prompt tuning alone.
+After adding Groq, `llm_calls.model_name` kept reporting `llama3.2` even when Groq's model demonstrably ran (proven by latency). Root cause: the field was read from a hardcoded `@Value` property, ignoring which `ChatModel` bean was actually active. Fixed by making `ActiveModelInfo` itself profile-scoped. A direct regression test now exists for this exact bug.
 
 ---
 
-### 7. Why `GitHubClient` and AI Configuration Live in `shared/`, Not `standup/`
+## Feature 2: PR Context Enricher — Design Decisions
 
-**The test applied:** will more than one feature ever need this exact tool? Both `GitHubClient` (GitHub API access) and `ChatModelConfig`/`ActiveModelInfo` (LLM access) will be needed by features beyond the standup generator — the planned PR Context Enricher needs GitHub diffs and an LLM call; the planned Codebase Q&A needs both too.
+### 7. Webhook Signature Verification, Not API-Key Auth
 
-Putting shared infrastructure in feature-named folders would mean duplicating authentication setup across multiple copies, or having feature folders awkwardly depend on each other — both violate the principle that feature folders should be self-contained. Fixing a bug in `GitHubClient` once, in `shared/`, fixes it for every feature that will ever use it.
+GitHub initiates this flow, not a tenant — there's no Bearer token to check. Instead, GitHub signs every payload with HMAC-SHA256 using a shared secret, and `GitHubWebhookSignatureVerifier` recomputes that signature and compares it using a **constant-time comparison** (`MessageDigest.isEqual`), specifically to prevent timing-based signature-guessing attacks. This is a fundamentally different authentication model from the rest of the system, used because the trigger itself is fundamentally different — push, not pull.
+
+### 8. Idempotency via an Existence Check, Not Just Hope
+
+GitHub redelivers webhooks on timeouts and transient failures — this is documented platform behavior, not a hypothetical. `PrContextEnricherService.enrich()` checks `existsByGithubOwnerAndGithubRepoAndPrNumber` before doing any work at all. A duplicate delivery is detected and skipped, rather than posting a second comment or paying for a second LLM call. This is tested directly, not just assumed to work.
+
+### 9. Asynchronous Processing (`@Async`)
+
+GitHub expects a fast response to a webhook delivery — a slow response risks GitHub treating the delivery as failed and retrying it unnecessarily. The controller returns `200` immediately after persisting the raw event; the actual diff fetch, LLM call, and comment posting happen on a background thread via `@Async`, with the outcome (success or specific error message) written back onto the same `WebhookEvent` row afterward. **Honest limitation:** this uses Spring's in-memory thread pool, not a durable queue — a crash mid-processing loses that specific job. See `ARCHITECTURE.md` for what a production fix would require.
+
+### 10. `tenant_id` Made Nullable on `llm_calls`
+
+PR enrichment has no tenant context at all — no Bearer token, no authenticated caller. Forcing a synthetic tenant ID into the audit log to satisfy a `NOT NULL` constraint would be dishonest data. The column was deliberately relaxed rather than worked around.
+
+### 11. The Webhook Controller Lives in `prcontext/`, Not `shared/webhook/`
+
+`WebhookEvent`, its repository, and the signature verifier are genuinely generic — any future webhook source could reuse them, so they stay in `shared/webhook/`. The controller itself, once it started parsing `pull_request`-specific payloads and deciding what to do with them, became feature logic — so it moved to `prcontext/`. The same "will more than one feature need this exact thing" test used everywhere else in this codebase.
+
+### 12. `GitHubClient` Gained Two New Methods, Not a New Client
+
+`fetchPullRequestFiles` and `postIssueComment` were added directly onto the existing `GitHubClient` rather than creating a second GitHub client class. Both features genuinely share the same authentication setup and base URL — splitting them would have meant either duplicated connection logic or one feature awkwardly depending on another feature's client.
+
+### 13. Deliberately Scoped Out: Linear/Jira/Slack Integration
+
+The original plan included pulling ticket context and Slack discussion into the PR comment. Building three additional third-party integrations would have roughly doubled the remaining work for proportionally thin payoff on a single-person project. The feature works meaningfully from the PR's own title, description, and diff alone — external context integration is documented as real future work, not silently dropped.
 
 ---
 
-### 8. `GitHubClient` Receives Its `RestClient`, It Doesn't Build One
+## The Most Important Honest Limitation: Two Tenancy Models
 
-**The problem:** the original implementation built its own `RestClient` inside its constructor. This made the class fundamentally untestable — there was no way to substitute a fake HTTP server, since the client always constructed a real one internally.
+The Standup Generator is fully multi-tenant — authenticated, ownership-verified. The PR Context Enricher has **no tenant scoping at all** — it runs on whatever single repository the webhook is configured against, using one shared token and one shared secret.
 
-**The fix:** `GitHubClientConfig` builds the `RestClient` as a separate Spring bean; `GitHubClient` simply receives the finished object via constructor injection. This is a general testing principle, not specific to this project: **depend on the finished thing, don't construct it yourself.** `GitHubClientTest` uses Spring's `MockRestServiceServer` to substitute a fake HTTP server entirely — zero real network calls happen during the test suite, yet the real parsing logic is fully exercised.
-
----
-
-### 9. The Audit Log Bug — Reporting the Wrong Model Name
-
-**What happened:** after building the Groq/Ollama dual-provider system, the `llm_calls` audit table continued reporting `modelName: llama3.2` even when Groq's `llama-3.3-70b-versatile` was demonstrably the one that ran (confirmed by the dramatically faster latency).
-
-**Root cause:** `StandupSummaryService` read the model name from a hardcoded `@Value("${ollama.model-name}")` field — regardless of which `ChatModel` bean Spring had actually injected based on the active profile. The audit log was quietly lying about which provider handled each request.
-
-**The fix:** `ActiveModelInfo` is now itself a profile-scoped bean — `!prod` resolves to the Ollama model name, `prod` resolves to the Groq model name — injected directly into `StandupSummaryService` instead of read from a static property. `StandupSummaryServiceTest` includes a direct regression test for this exact bug: it asserts `result.modelName()` matches what was actually configured for that test, not a hardcoded default.
-
-**Why this matters beyond the fix itself:** an audit log that silently reports incorrect data is arguably worse than no audit log at all — it creates false confidence. Catching this required actually reading the data the system produced, not just trusting that the feature "worked" because the response came back fast.
-
----
-
-### 10. Database Provider Choice: Neon Over a Second Render Postgres
-
-**The constraint:** Render's free tier allows only one free PostgreSQL database per workspace, and that allocation was already used by an earlier project (`advanced-wallet-ledger-api`).
-
-**The decision:** Neon, a separate provider, was used for DevPulse's production database instead. This wasn't purely a workaround — Neon's free tier has no expiration, unlike Render's free Postgres, which expires 30 days after creation. For a portfolio project meant to stay demonstrable indefinitely, this is arguably the better choice regardless of the Render constraint.
-
-**Zero code changes required** — Neon speaks standard PostgreSQL wire protocol; only the JDBC connection string, username, and password differ from a Render-hosted database.
+This is not an oversight; it's a direct consequence of the trigger model. A pull-based feature naturally carries tenant context (the caller authenticates). A push-based webhook from GitHub has no native concept of "which DevPulse tenant does this belong to" — that would require either per-tenant webhook secrets with a routing table, or migrating to a GitHub App installation model where GitHub itself tracks the tenant relationship. Full reasoning and the real fix required is in [`ARCHITECTURE.md`](./ARCHITECTURE.md) — stated there directly rather than smoothed over here.
 
 ---
 
 ## Success Metrics
 
-| Metric | Target | How it's verified |
+| Metric | Target | Verified By |
 |---|---|---|
-| No-hallucination guarantee | LLM never called on empty input | Unit test (`verify(chatModel, never())...`) |
-| Tenant isolation | Cross-tenant developer access returns 404 | Manual negative test + code review |
-| Audit log accuracy | `modelName` matches the provider that actually ran | Regression unit test |
-| API key security | Plaintext key never persisted, shown exactly once | Unit test on `TenantService.register()` |
-| Provider swap correctness | Switching `prod` profile changes both behavior and audit data | Manually verified: ~45s/llama3.2 vs ~1.5s/llama-3.3-70b-versatile |
+| No-hallucination guarantee (standup) | LLM never called on empty input | Unit test |
+| No-hallucination guarantee (PR context) | N/A — diff always provides some content | — |
+| Tenant isolation (standup) | Cross-tenant access returns 404 | Manual + code-level test |
+| Webhook authenticity | Tampered/wrong-secret signatures rejected | 5 unit tests |
+| Idempotent PR enrichment | Duplicate webhook never double-posts | Unit test |
+| Audit log accuracy | `model_name` matches the provider that actually ran | Regression test |
+| Failure isolation | A failed enrichment is logged, not silently lost | Unit test |
 
 ---
 
 ## Who Would Use This
 
-**Engineering teams at startups** who want to eliminate daily standup-prep overhead without adopting a heavyweight, all-in-one engineering analytics platform.
+**Engineering teams** wanting to remove daily standup overhead and reduce PR review ramp-up time, without adopting a heavyweight all-in-one engineering analytics platform.
 
-**Platform engineers evaluating LangChain4j** — there are few production-grade, open-source Java examples of LangChain4j with a real dual-provider setup; this project demonstrates one concretely.
+**Platform engineers evaluating LangChain4j** in a Java-first stack, including a real dual-provider setup and a real webhook-driven async AI pipeline — both genuinely uncommon to find documented together in open source.
 
-**Developers learning multi-tenant SaaS patterns** — the split-key auth design, tenant ownership verification, and shared-vs-feature folder structure are all patterns directly transferable to other B2B API projects.
+**Developers studying multi-tenant SaaS patterns**, including the honest limits of those patterns when a feature's trigger model doesn't naturally carry tenant context — a real, common problem in webhook-driven systems, not unique to this project.
 
 ---
 
 ## Known Limitations (Honest Assessment)
 
-**Render free tier cold start** — 30-60 second delay on the first request after 15 minutes of inactivity. A paid tier or a different always-on host would eliminate this.
-
-**No event-driven architecture yet** — standup generation is purely request-triggered. The originally-planned PR Context Enricher requires webhook-driven processing, which hasn't been built yet.
-
-**No rate limiting** — a tenant could call the AI endpoint repeatedly with no throttling, which would matter at real scale or with a paid LLM provider with per-call costs.
-
-**Style-matching quality is data-dependent** — on a young repository with limited commit history, the AI summary reads more generically. This is expected to improve naturally over time, not a fixable prompt issue.
-
-**Neon free tier storage (0.5 GB)** — sufficient for demo and portfolio purposes, not for real production data volume.
+See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full assessment. In summary: no repository-to-tenant mapping for PR Context, no durable queue for async processing, no rate limiting on either feature, free-tier infrastructure ceilings (Render cold starts, Neon storage cap), and no external ticket/chat system integration.
 
 ---
 
@@ -161,11 +116,11 @@ Putting shared infrastructure in feature-named folders would mean duplicating au
 
 | Priority | Improvement | Business Justification |
 |---|---|---|
-| 1 | Per-tenant rate limiting | Prevents one tenant from exhausting shared AI quota |
-| 2 | PR Context Enricher (webhook-driven) | Proves event-driven architecture, not just request/response |
-| 3 | Codebase Q&A via RAG (PGVector) | Demonstrates the core LangChain4j RAG skill explicitly |
-| 4 | Standup edit-distance tracking | Real product metric — measures whether the AI output is actually useful |
-| 5 | Idempotency keys on standup generation | Protects against double-submission race conditions |
+| 1 | Repository-to-tenant mapping (GitHub App model) | Closes the most significant architectural gap in the system |
+| 2 | Durable async queue (SQS/RabbitMQ) | Prevents silent job loss on crash; required before real production traffic |
+| 3 | Per-tenant rate limiting | Cost control and fairness once using a metered LLM provider |
+| 4 | Codebase Q&A via RAG (PGVector) | The core LangChain4j RAG skill, not yet demonstrated |
+| 5 | Linear/Jira/Slack context integration | Closes the gap deliberately deferred in decision #13 above |
 
 ---
 
@@ -173,13 +128,17 @@ Putting shared infrastructure in feature-named folders would mean duplicating au
 
 | Decision | Alternative Considered | Why This Choice Won |
 |---|---|---|
-| Split-key auth (`keyId` + `secret`) | Single opaque API key | BCrypt hashes can't be queried directly; splitting enables fast indexed lookup |
-| 404 for cross-tenant access | 403 Forbidden | 404 reveals nothing about whether the resource exists at all |
-| Dual ChatModel beans via `@Profile` | Single hardcoded provider | Free local development + fast cloud production, zero code duplication |
-| `langchain4j-open-ai` for Groq | Wait for native Groq module | No dedicated module exists yet; OpenAI-compatibility is the standard workaround |
-| System/User message split | Single combined prompt block | Eliminated AI preamble leakage that violated explicit output format rules |
-| `RestClient` injected, not self-built | `GitHubClient` builds its own client | Made the class genuinely unit-testable with a fake HTTP server |
-| Neon for production database | Second Render Postgres | Render allows only one free DB per workspace; Neon's free tier never expires |
-| Profile-scoped `ActiveModelInfo` bean | Hardcoded `@Value` model name field | Fixed a real bug where the audit log misreported which AI provider actually ran |
+| Split-key auth | Single opaque API key | BCrypt hashes can't be queried directly |
+| 404 for cross-tenant access | 403 Forbidden | Reveals nothing about whether a resource exists |
+| Dual `ChatModel` beans via `@Profile` | Single hardcoded provider | Free local dev + fast cloud production, zero duplication |
+| `langchain4j-open-ai` for Groq | Wait for a native Groq module | No dedicated module exists yet; this is the standard workaround |
+| HMAC signature verification for webhooks | API-key auth for webhooks too | GitHub initiates this flow — there's no tenant token to check |
+| Idempotency via existence check | Trust GitHub never redelivers | Webhook redelivery is documented, real platform behavior |
+| `@Async` for webhook processing | Fully synchronous | GitHub expects a fast response; processing shouldn't block it |
+| `tenant_id` made nullable on `llm_calls` | Synthetic placeholder tenant ID | A fake ID would be dishonest audit data |
+| Controller moved to `prcontext/` | Left in `shared/webhook/` | Feature-specific parsing logic isn't shared infrastructure |
+| No Linear/Jira/Slack integration (yet) | Build all three now | Disproportionate scope increase for a single-person project; documented as future work |
 
 ---
+
+*See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the deeper, system-level assessment.*
