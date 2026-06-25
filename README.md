@@ -194,44 +194,9 @@ Tests run: 14, Failures: 0, Errors: 0
 
 ## Architecture
 
-```
-                    ┌─────────────────────────┐
-                    │   Authenticated Client    │
-                    └────────────┬─────────────┘
-                                 │ Bearer token
-                                 ▼
-                    ┌─────────────────────────┐
-                    │ ApiKeyAuthenticationFilter│
-                    └────────────┬─────────────┘
-                                 ▼
-                    ┌─────────────────────────┐
-                    │   StandupController      │  ← tenant ownership verified
-                    └────────────┬─────────────┘
-                                 ▼
-                  GitHubClient ──────► Ollama / Groq ──────► standups + llm_calls
+For the full system diagram, both features' step-by-step workflows, the database schema, and an honest assessment of what's production-grade versus simplified — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
-
-                    ┌─────────────────────────┐
-                    │      GitHub Webhook       │
-                    └────────────┬─────────────┘
-                                 │ HMAC-SHA256 signature
-                                 ▼
-                    ┌─────────────────────────┐
-                    │  GitHubWebhookController  │  ← signature verified, event logged
-                    └────────────┬─────────────┘
-                                 │ @Async
-                                 ▼
-                    ┌─────────────────────────┐
-                    │ PrContextEnricherService  │  ← idempotency check first
-                    └────────────┬─────────────┘
-                                 ▼
-                  GitHubClient ──────► Ollama / Groq ──────► pr_enrichments + llm_calls
-                                 │
-                                 ▼
-                      Comment posted to GitHub PR
-```
-
-For the honest assessment of where these two flows diverge architecturally (and why), see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+**The short version:** an authenticated client triggers the Standup Generator synchronously; GitHub itself triggers the PR Context Enricher asynchronously via a signed webhook. Both share the same underlying `GitHubClient` and dual-provider AI configuration, persisting to the same `llm_calls` audit table.
 
 ---
 
