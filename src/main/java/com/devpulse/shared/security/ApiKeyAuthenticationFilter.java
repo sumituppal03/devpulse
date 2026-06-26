@@ -52,9 +52,7 @@ public class ApiKeyAuthenticationFilter extends OncePerRequestFilter {
                 if (tenantMatch.isPresent()
                         && apiKeyService.secretMatches(parsed.keySecret(), tenantMatch.get().getApiKeyHash())) {
 
-                    var authentication = new UsernamePasswordAuthenticationToken(
-                            tenantMatch.get().getId(), null, List.of()
-                    );
+                    var authentication = new UsernamePasswordAuthenticationToken(tenantMatch.get().getId(), null, List.of());
                     SecurityContextHolder.getContext().setAuthentication(authentication);
                 }
             }
