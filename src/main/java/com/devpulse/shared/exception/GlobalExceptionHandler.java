@@ -1,6 +1,7 @@
 package com.devpulse.shared.exception;
 
 import com.devpulse.developer.TenantOwnershipException;
+import com.devpulse.shared.ratelimit.RateLimitExceededException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -42,5 +43,10 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiError> handleTenantOwnership(TenantOwnershipException ex) {
         ApiError error = ApiError.of(HttpStatus.NOT_FOUND.value(), "Resource not found", Map.of());
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
+    }
+    @ExceptionHandler(RateLimitExceededException.class)
+    public ResponseEntity<ApiError> handleRateLimitExceeded(RateLimitExceededException ex) {
+        ApiError error = ApiError.of(429, ex.getMessage(), Map.of());
+        return ResponseEntity.status(429).body(error);
     }
 }

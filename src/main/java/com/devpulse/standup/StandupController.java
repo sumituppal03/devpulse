@@ -6,6 +6,8 @@ import com.devpulse.shared.ai.LlmCall;
 import com.devpulse.shared.ai.LlmCallRepository;
 import com.devpulse.shared.github.GitHubClient;
 import com.devpulse.shared.github.GitHubCommitResponse;
+import com.devpulse.shared.ratelimit.RateLimiterService;
+import com.devpulse.shared.ratelimit.RateLimitExceededException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.transaction.annotation.Transactional;
@@ -26,6 +28,7 @@ public class StandupController {
     private final DeveloperService developerService;
     private final StandupRepository standupRepository;
     private final LlmCallRepository llmCallRepository;
+    private final RateLimiterService rateLimiterService;
 
     @GetMapping("/api/v1/standup/generate")
     @Transactional
@@ -36,6 +39,9 @@ public class StandupController {
             @RequestParam(required = false) String date) {
 
         UUID tenantId = (UUID) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+        if (!rateLimiterService.isAllowed(tenantId)) {
+                throw new RateLimitExceededException("Rate limit exceeded: max 10 standup requests per minute.");
+        }
         Developer developer = developerService.getOwnedByTenant(developerId, tenantId);
 
         LocalDate targetDate = (date != null) ? LocalDate.parse(date) : LocalDate.now().minusDays(1);

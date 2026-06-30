@@ -18,6 +18,12 @@ spring:
     locations: classpath:db/migration
     baseline-on-migrate: true
 
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:localhost}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      password: ${SPRING_DATA_REDIS_PASSWORD:}
+
 server:
   port: ${SERVER_PORT:8080}
 
@@ -36,14 +42,13 @@ logging:
     org.hibernate.SQL: WARN
 
 github:
-  token: ${GITHUB_TOKEN:}  
-  webhook-secret: ${GITHUB_WEBHOOK_SECRET:}  
+  token: ${GITHUB_TOKEN:}
+  webhook-secret: ${GITHUB_WEBHOOK_SECRET:}
 
 ollama:
   base-url: ${OLLAMA_BASE_URL:http://localhost:11434}
-  model-name: ${OLLAMA_MODEL_NAME:llama3.2} 
+  model-name: ${OLLAMA_MODEL_NAME:llama3.2}
 
 groq:
   api-key: ${GROQ_API_KEY:}
   model-name: ${GROQ_MODEL_NAME:llama-3.3-70b-versatile}
-    
