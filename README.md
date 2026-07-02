@@ -257,6 +257,13 @@ Health check: **`https://devpulse-ohby.onrender.com/actuator/health`**
 **Sumit Uppal** — Backend Engineer
 [GitHub](https://github.com/sumituppal03)
 
+## Table of Contents
+
+- [The Problem](#the-problem)
+- [Two Features, Two Architectural Patterns](#two-features-two-architectural-patterns)
+- [Live Demo](#live-demo)
+- [Author](#author)
+
 ---
 
 *Built to production standard, including the bugs found and fixed, and the gaps stated honestly rather than hidden. See [`BUSINESS.md`](./BUSINESS.md) and [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full reasoning.*
