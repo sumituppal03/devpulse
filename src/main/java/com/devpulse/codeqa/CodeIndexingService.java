@@ -8,7 +8,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -30,17 +31,28 @@ public class CodeIndexingService {
     private final EmbeddingModel embeddingModel;
     private final CodeChunkRepository codeChunkRepository;
     private final RepositoryJpaRepository repositoryJpaRepository;
+    private final PlatformTransactionManager transactionManager;
 
+    // Each unit of work (status flip, each batch save) commits in its own short
+    // transaction via this template, instead of wrapping the entire multi-minute
+    // GitHub-fetch + embedding job in one @Transactional method. Previously, a
+    // failure at the very end (e.g. one bad insert) rolled back everything —
+    // including chunks that had already been successfully embedded and "saved"
+    // minutes earlier — because nothing actually committed until the whole
+    // method returned. Now each batch is durable the moment it's written, and
+    // status changes (INDEXING/READY/FAILED) are visible to callers immediately.
     @Async
-    @Transactional
     public void indexRepository(Repository repository) {
         log.info("Starting indexing for {}/{}", repository.getGithubOwner(), repository.getGithubRepo());
-        repository.setIndexStatus("INDEXING");
-        repositoryJpaRepository.save(repository);
+        TransactionTemplate tx = new TransactionTemplate(transactionManager);
+
+        tx.executeWithoutResult(status -> {
+            repository.setIndexStatus("INDEXING");
+            repositoryJpaRepository.save(repository);
+            codeChunkRepository.deleteByRepositoryId(repository.getId());
+        });
 
         try {
-            codeChunkRepository.deleteByRepositoryId(repository.getId());
-
             List<GitHubFileContent> files = gitHubClient.fetchRepositoryFiles(
                     repository.getGithubOwner(),
                     repository.getGithubRepo(),
@@ -78,7 +90,8 @@ public class CodeIndexingService {
                         batch.add(chunk);
 
                         if (batch.size() >= BATCH_SIZE) {
-                            codeChunkRepository.saveAll(batch);
+                            List<CodeChunk> toSave = List.copyOf(batch);
+                            tx.executeWithoutResult(status -> codeChunkRepository.saveAll(toSave));
                             totalChunks += batch.size();
                             batch.clear();
                             log.info("Saved {} chunks so far for {}/{}",
@@ -91,21 +104,27 @@ public class CodeIndexingService {
             }
 
             if (!batch.isEmpty()) {
-                codeChunkRepository.saveAll(batch);
+                List<CodeChunk> toSave = List.copyOf(batch);
+                tx.executeWithoutResult(status -> codeChunkRepository.saveAll(toSave));
                 totalChunks += batch.size();
             }
 
-            repository.setIndexStatus("READY");
-            repository.setLastIndexedAt(Instant.now());
-            repositoryJpaRepository.save(repository);
+            int finalTotalChunks = totalChunks;
+            tx.executeWithoutResult(status -> {
+                repository.setIndexStatus("READY");
+                repository.setLastIndexedAt(Instant.now());
+                repositoryJpaRepository.save(repository);
+            });
 
             log.info("Indexing complete for {}/{} — {} total chunks",
-                    repository.getGithubOwner(), repository.getGithubRepo(), totalChunks);
+                    repository.getGithubOwner(), repository.getGithubRepo(), finalTotalChunks);
 
         } catch (Exception e) {
             log.error("Indexing failed for {}/{}", repository.getGithubOwner(), repository.getGithubRepo(), e);
-            repository.setIndexStatus("FAILED");
-            repositoryJpaRepository.save(repository);
+            tx.executeWithoutResult(status -> {
+                repository.setIndexStatus("FAILED");
+                repositoryJpaRepository.save(repository);
+            });
         }
     }
 

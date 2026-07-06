@@ -5,6 +5,8 @@ import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.Type;
+import com.devpulse.shared.persistence.PgVectorType;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -52,9 +54,11 @@ public class CodeChunk {
 
     /**
      * Stored as pgvector string format "[0.1,0.2,...]".
-     * Hibernate maps this as plain TEXT — no special type needed.
-     * Native SQL uses CAST(:embedding AS vector) for <=> comparisons.
+     * PgVectorType binds this as Types.OTHER (an "unknown"-typed JDBC parameter)
+     * so Postgres infers the vector(768) column type at insert time, instead of
+     * rejecting a plain VARCHAR bind. See PgVectorType's javadoc for details.
      */
+    @Type(PgVectorType.class)
     @Column(name = "embedding", columnDefinition = "vector(768)")
     private String embedding;
 

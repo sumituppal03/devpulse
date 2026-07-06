@@ -2,6 +2,7 @@ package com.devpulse.shared.exception;
 
 import com.devpulse.developer.TenantOwnershipException;
 import com.devpulse.shared.ratelimit.RateLimitExceededException;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -13,6 +14,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 @RestControllerAdvice
+@Slf4j
 public class GlobalExceptionHandler {
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -32,6 +34,9 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ApiError> handleUnexpectedError(Exception ex) {
+        // Previously this swallowed every unexpected exception with zero logging,
+        // so a 500 in the console gave no clue what actually broke underneath.
+        log.error("Unhandled exception while processing request", ex);
         ApiError error = ApiError.of(
                 HttpStatus.INTERNAL_SERVER_ERROR.value(),
                 "An unexpected error occurred",
