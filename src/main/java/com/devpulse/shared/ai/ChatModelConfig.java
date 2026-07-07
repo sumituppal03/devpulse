@@ -42,7 +42,7 @@ public class ChatModelConfig {
                 .build();
     }
 
-    // NEW — tracks whichever model name actually corresponds to the active ChatModel bean
+    
     @Bean
     @Profile("!prod")
     public ActiveModelInfo activeModelInfoDev(@Value("${ollama.model-name}") String modelName) {
