@@ -256,6 +256,13 @@ Health: **`https://devpulse-ohby.onrender.com/actuator/health`**
 **Sumit Uppal** — Backend Engineer
 [GitHub](https://github.com/sumituppal03) · [LinkedIn](https://www.linkedin.com/in/sumit-uppal03/)
 
+## Table of Contents
+
+- [The Problem](#the-problem)
+- [Two Features, Two Architectural Patterns](#two-features-two-architectural-patterns)
+- [Live Demo](#live-demo)
+- [Author](#author)
+
 ---
 
 *Two live AI features, Redis-backed rate limiting, 18 tests passing. See [`BUSINESS.md`](./BUSINESS.md) for the full decision log.*
