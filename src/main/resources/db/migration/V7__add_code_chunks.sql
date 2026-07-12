@@ -1,5 +1,8 @@
--- pgvector extension must exist before this runs.
--- Already created manually; this ensures it's present on any fresh database too.
+-- V7__add_code_chunks.sql
+--
+-- pgvector extension must exist before this migration runs.
+-- The extension is created manually on the database before first deploy.
+-- This line is a safety net for fresh environments.
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE repositories (
@@ -28,7 +31,13 @@ CREATE TABLE code_chunks (
     content          TEXT NOT NULL,
     token_count      INTEGER,
     commit_sha       VARCHAR(40),
-    embedding        vector(768),
+
+    -- Stored as TEXT containing the pgvector string "[0.1,0.2,...]".
+    -- Hibernate maps this as plain VARCHAR with no special type adapter.
+    -- CAST(:embedding AS vector) in native SQL handles the conversion
+    -- at query time. This avoids the need for any pgvector JDBC extension.
+    embedding        TEXT,
+
     embedding_model  VARCHAR(100) NOT NULL DEFAULT 'nomic-embed-text:v1.5',
     indexed_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -36,9 +45,13 @@ CREATE TABLE code_chunks (
 -- Tenant isolation index — every similarity search filters by tenant first
 CREATE INDEX idx_code_chunks_tenant_id ON code_chunks(tenant_id);
 
--- IVFFlat index for fast approximate nearest-neighbour search (cosine distance)
--- lists=100 is appropriate for tens of thousands of chunks
-CREATE INDEX idx_code_chunks_embedding
-    ON code_chunks
-    USING ivfflat (embedding vector_cosine_ops)
-    WITH (lists = 100);
+-- NOTE: The ivfflat similarity index on code_chunks.embedding is NOT created here.
+--
+-- Reason: ivfflat requires at least `lists` rows of data to build meaningfully.
+-- Creating it on an empty table produces a degenerate index that returns the
+-- same row for every query regardless of the search vector — confirmed in testing.
+--
+-- The index is instead rebuilt automatically at the END of each successful
+-- indexing run by CodeIndexingService.rebuildVectorIndex(), which calls
+-- CodeChunkRepository.rebuildVectorIndex(). This guarantees the index is
+-- always built on real data, never on an empty table.

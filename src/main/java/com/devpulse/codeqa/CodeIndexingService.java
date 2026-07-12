@@ -33,14 +33,6 @@ public class CodeIndexingService {
     private final RepositoryJpaRepository repositoryJpaRepository;
     private final PlatformTransactionManager transactionManager;
 
-    // Each unit of work (status flip, each batch save) commits in its own short
-    // transaction via this template, instead of wrapping the entire multi-minute
-    // GitHub-fetch + embedding job in one @Transactional method. Previously, a
-    // failure at the very end (e.g. one bad insert) rolled back everything —
-    // including chunks that had already been successfully embedded and "saved"
-    // minutes earlier — because nothing actually committed until the whole
-    // method returned. Now each batch is durable the moment it's written, and
-    // status changes (INDEXING/READY/FAILED) are visible to callers immediately.
     @Async
     public void indexRepository(Repository repository) {
         log.info("Starting indexing for {}/{}", repository.getGithubOwner(), repository.getGithubRepo());
@@ -91,7 +83,7 @@ public class CodeIndexingService {
 
                         if (batch.size() >= BATCH_SIZE) {
                             List<CodeChunk> toSave = List.copyOf(batch);
-                            tx.executeWithoutResult(status -> codeChunkRepository.saveAll(toSave));
+                            tx.executeWithoutResult(s -> codeChunkRepository.saveAll(toSave));
                             totalChunks += batch.size();
                             batch.clear();
                             log.info("Saved {} chunks so far for {}/{}",
@@ -105,23 +97,35 @@ public class CodeIndexingService {
 
             if (!batch.isEmpty()) {
                 List<CodeChunk> toSave = List.copyOf(batch);
-                tx.executeWithoutResult(status -> codeChunkRepository.saveAll(toSave));
+                tx.executeWithoutResult(s -> codeChunkRepository.saveAll(toSave));
                 totalChunks += batch.size();
             }
 
-            int finalTotalChunks = totalChunks;
-            tx.executeWithoutResult(status -> {
+            // Rebuild the ivfflat index AFTER data is saved.
+            // Building ivfflat on an empty table (as migration V7 originally did)
+            // produces a degenerate index that always returns the same rows.
+            // Rebuilding here, on real data, gives meaningful similarity search.
+            try {
+                tx.executeWithoutResult(s -> codeChunkRepository.rebuildVectorIndex());
+                log.info("Vector index rebuilt successfully for {}/{}",
+                        repository.getGithubOwner(), repository.getGithubRepo());
+            } catch (Exception e) {
+                log.warn("Vector index rebuild failed — search quality may be degraded: {}", e.getMessage());
+            }
+
+            int finalTotal = totalChunks;
+            tx.executeWithoutResult(s -> {
                 repository.setIndexStatus("READY");
                 repository.setLastIndexedAt(Instant.now());
                 repositoryJpaRepository.save(repository);
             });
 
             log.info("Indexing complete for {}/{} — {} total chunks",
-                    repository.getGithubOwner(), repository.getGithubRepo(), finalTotalChunks);
+                    repository.getGithubOwner(), repository.getGithubRepo(), finalTotal);
 
         } catch (Exception e) {
             log.error("Indexing failed for {}/{}", repository.getGithubOwner(), repository.getGithubRepo(), e);
-            tx.executeWithoutResult(status -> {
+            tx.executeWithoutResult(s -> {
                 repository.setIndexStatus("FAILED");
                 repositoryJpaRepository.save(repository);
             });
@@ -178,10 +182,6 @@ public class CodeIndexingService {
         return "config";
     }
 
-    /**
-     * Converts float[] to pgvector string format: "[0.12345,-0.67891,...]"
-     * Hibernate stores this as TEXT; PostgreSQL casts it to vector at query time.
-     */
     private String toVectorString(float[] vector) {
         StringBuilder sb = new StringBuilder("[");
         for (int i = 0; i < vector.length; i++) {
