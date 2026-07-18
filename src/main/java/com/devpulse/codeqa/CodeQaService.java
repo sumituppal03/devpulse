@@ -26,30 +26,38 @@ public class CodeQaService {
     private final ChatModel chatModel;
     private final CodeChunkRepository codeChunkRepository;
 
-    public CodeQaResponse ask(UUID tenantId, String question) {
+    /**
+     * Answers a natural-language question about a specific repository.
+     *
+     * repositoryId is now properly passed to the similarity search — previously
+     * it was validated but then ignored, meaning a question about repo A could
+     * return chunks from repo B if the tenant had multiple repos registered.
+     * This is fixed: results always come from the exact repo the user asked about.
+     */
+    public CodeQaResponse ask(UUID tenantId, UUID repositoryId, String question) {
 
         // 1. Embed the question using the same model as the indexed chunks
         Embedding questionEmbedding = embeddingModel.embed(question).content();
         String queryVector = toVectorString(questionEmbedding.vector());
 
-        // 2. Similarity search — tenant-scoped, so no cross-tenant data ever leaks
+        // 2. Similarity search — scoped to tenant AND this specific repository
         List<CodeChunk> relevantChunks = codeChunkRepository.findTopKSimilar(
                 tenantId.toString(),
+                repositoryId.toString(),
                 queryVector,
                 TOP_K
         );
 
-        // 3. If no chunks found, return immediately — LLM never called on empty context
+        // 3. No chunks found — repo may not be indexed yet
         if (relevantChunks.isEmpty()) {
             return new CodeQaResponse(
-                    "No indexed codebase found for this tenant. " +
-                    "Please register a repository with POST /api/v1/repos and " +
-                    "trigger indexing with POST /api/v1/repos/{id}/index first.",
+                    "No indexed content found for this repository. " +
+                    "Trigger indexing at POST /api/v1/repos/{id}/index and wait for status READY.",
                     List.of(), 0, false
             );
         }
 
-        // 4. Build grounded context from retrieved chunks, with file citations
+        // 4. Build grounded context with file citations
         String context = relevantChunks.stream()
                 .map(chunk -> {
                     String location = chunk.getFilePath();
@@ -66,14 +74,14 @@ public class CodeQaService {
                 .distinct()
                 .collect(Collectors.toList());
 
-        // 5. Grounded LLM call — same system/user split pattern as standup feature
+        // 5. Grounded LLM call — same system/user split as standup and PR context
         SystemMessage systemMessage = SystemMessage.from("""
                 You are a technical assistant for an engineering team.
-                Answer questions about their codebase based ONLY on the code context provided below.
+                Answer questions about their codebase based ONLY on the code context provided.
                 Always cite the specific file path where you found the answer.
                 If the context does not contain enough information to answer confidently,
-                say exactly: "I don't have enough context in the indexed codebase to answer this."
-                Never invent code or explanations that are not in the provided context.
+                say: "I don't have enough context in the indexed codebase to answer this."
+                Never invent code or explanations not present in the provided context.
                 Be concise and technical.
                 """);
 
@@ -84,21 +92,15 @@ public class CodeQaService {
                 %s
                 """.formatted(question, context));
 
-        // ChatResponse.aiMessage().text() is the correct LangChain4j 1.x API
-        // (not .content() which doesn't exist on ChatResponse in this version)
         ChatResponse chatResponse = chatModel.chat(systemMessage, userMessage);
         String answer = chatResponse.aiMessage().text();
 
-        log.info("CodeQA answered for tenant {} — {} chunks from {} files",
-                tenantId, relevantChunks.size(), sources.size());
+        log.info("CodeQA answered for tenant={} repo={} — {} chunks from {} files",
+                tenantId, repositoryId, relevantChunks.size(), sources.size());
 
         return new CodeQaResponse(answer, sources, relevantChunks.size(), true);
     }
 
-    /**
-     * Converts float[] to pgvector string "[0.12345,-0.67891,...]"
-     * matching the format stored in code_chunks.embedding.
-     */
     private String toVectorString(float[] vector) {
         StringBuilder sb = new StringBuilder("[");
         for (int i = 0; i < vector.length; i++) {

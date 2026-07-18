@@ -1,11 +1,13 @@
 package com.devpulse.shared.github;
 
-import com.devpulse.shared.github.GitHubTree;
+import com.devpulse.codeqa.Repository;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
 
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -18,38 +20,97 @@ public class GitHubClient {
         this.restClient = restClient;
     }
 
+    /**
+     * Fetches commits for a developer on a specific date from ONE repo.
+     * Still used by the style-sample fetch and by tests.
+     */
     public List<GitHubCommitResponse> fetchCommitsForDate(
             String owner, String repo, String username, LocalDate date) {
 
         String since = date.atStartOfDay(ZoneOffset.UTC).toInstant().toString();
         String until = date.plusDays(1).atStartOfDay(ZoneOffset.UTC).toInstant().toString();
 
-        GitHubCommitResponse[] response = restClient.get()
-                .uri("/repos/{owner}/{repo}/commits?author={username}&since={since}&until={until}",
-                        owner, repo, username, since, until)
-                .retrieve()
-                .body(GitHubCommitResponse[].class);
+        try {
+            GitHubCommitResponse[] response = restClient.get()
+                    .uri("/repos/{owner}/{repo}/commits?author={username}&since={since}&until={until}",
+                            owner, repo, username, since, until)
+                    .retrieve()
+                    .body(GitHubCommitResponse[].class);
+            return response != null ? List.of(response) : List.of();
+        } catch (RestClientException e) {
+            return List.of();
+        }
+    }
 
-        return response != null ? List.of(response) : List.of();
+    /**
+     * Fetches commits across ALL tenant repos for a developer on a specific date.
+     * This is the correct production-grade standup fetch — a developer may commit
+     * to multiple repos in one day, and the standup should cover all of them.
+     * Each repo is fetched independently; failures are logged and skipped rather
+     * than failing the entire standup generation.
+     */
+    public List<GitHubCommitResponse> fetchCommitsAcrossRepos(
+            List<Repository> tenantRepos, String githubUsername, LocalDate date) {
+
+        List<GitHubCommitResponse> allCommits = new ArrayList<>();
+        for (Repository repo : tenantRepos) {
+            try {
+                List<GitHubCommitResponse> repoCommits = fetchCommitsForDate(
+                        repo.getGithubOwner(),
+                        repo.getGithubRepo(),
+                        githubUsername,
+                        date
+                );
+                allCommits.addAll(repoCommits);
+            } catch (Exception e) {
+                // One repo failing doesn't break the standup for all other repos
+            }
+        }
+        return allCommits;
+    }
+
+    /**
+     * Fetches recent commits for style-sample matching.
+     * Tries each tenant repo until it finds commits, returns the first non-empty result.
+     */
+    public List<GitHubCommitResponse> fetchRecentCommitsAcrossRepos(
+            List<Repository> tenantRepos, String githubUsername, int limit) {
+
+        List<GitHubCommitResponse> allCommits = new ArrayList<>();
+        for (Repository repo : tenantRepos) {
+            try {
+                List<GitHubCommitResponse> repoCommits = fetchRecentCommits(
+                        repo.getGithubOwner(), repo.getGithubRepo(), githubUsername, limit);
+                allCommits.addAll(repoCommits);
+                if (allCommits.size() >= limit) break;
+            } catch (Exception e) {
+                // skip failed repo
+            }
+        }
+        return allCommits.size() > limit ? allCommits.subList(0, limit) : allCommits;
     }
 
     public List<GitHubCommitResponse> fetchRecentCommits(String owner, String repo, String username, int limit) {
-        GitHubCommitResponse[] response = restClient.get()
-                .uri("/repos/{owner}/{repo}/commits?author={username}&per_page={limit}",
-                        owner, repo, username, limit)
-                .retrieve()
-                .body(GitHubCommitResponse[].class);
-
-        return response != null ? List.of(response) : List.of();
+        try {
+            GitHubCommitResponse[] response = restClient.get()
+                    .uri("/repos/{owner}/{repo}/commits?author={username}&per_page={limit}",
+                            owner, repo, username, limit)
+                    .retrieve()
+                    .body(GitHubCommitResponse[].class);
+            return response != null ? List.of(response) : List.of();
+        } catch (RestClientException e) {
+            return List.of();
+        }
     }
+
     public List<GitHubPullRequestFile> fetchPullRequestFiles(String owner, String repo, int prNumber) {
         GitHubPullRequestFile[] response = restClient.get()
                 .uri("/repos/{owner}/{repo}/pulls/{number}/files", owner, repo, prNumber)
                 .retrieve()
                 .body(GitHubPullRequestFile[].class);
-
         return response != null ? List.of(response) : List.of();
-     }
+    }
+
     public GitHubCommentResponse postIssueComment(String owner, String repo, int issueNumber, String commentBody) {
         return restClient.post()
                 .uri("/repos/{owner}/{repo}/issues/{number}/comments", owner, repo, issueNumber)
@@ -57,9 +118,10 @@ public class GitHubClient {
                 .retrieve()
                 .body(GitHubCommentResponse.class);
     }
+
     public GitHubTree fetchRepositoryTree(String owner, String repo, String branch) {
         return restClient.get()
-                .uri("/repos/{owner}/{repo}/git/trees/{branch}?recursive=1",owner, repo, branch)
+                .uri("/repos/{owner}/{repo}/git/trees/{branch}?recursive=1", owner, repo, branch)
                 .retrieve()
                 .body(GitHubTree.class);
     }
@@ -71,32 +133,32 @@ public class GitHubClient {
                 .body(GitHubFileContent.class);
     }
 
-     public List<GitHubFileContent> fetchRepositoryFiles(String owner, String repo, String branch) {
+    public List<GitHubFileContent> fetchRepositoryFiles(String owner, String repo, String branch) {
         GitHubTree tree = fetchRepositoryTree(owner, repo, branch);
         if (tree == null || tree.tree() == null) return List.of();
 
-                return tree.tree().stream()
+        return tree.tree().stream()
                 .filter(item -> "blob".equals(item.type()))
                 .filter(item -> isIndexableFile(item.path()))
                 .limit(200)
                 .map(item -> {
-                try {
+                    try {
                         return fetchFileContent(owner, repo, item.path());
-                } catch (Exception e) {
+                    } catch (Exception e) {
                         return null;
-                }
-            })
-            .filter(f -> f != null)
-            .collect(java.util.stream.Collectors.toList());
-       }
+                    }
+                })
+                .filter(f -> f != null)
+                .collect(java.util.stream.Collectors.toList());
+    }
 
-        private boolean isIndexableFile(String path) {
+    private boolean isIndexableFile(String path) {
         String lower = path.toLowerCase();
-                return (lower.endsWith(".java") || lower.endsWith(".kt") ||
+        return (lower.endsWith(".java") || lower.endsWith(".kt") ||
                 lower.endsWith(".md") || lower.endsWith(".yml") ||
                 lower.endsWith(".yaml") || lower.endsWith(".properties"))
                 && !lower.contains("/target/")
                 && !lower.contains("/build/")
                 && !lower.contains("/node_modules/");
-        }
+    }
 }

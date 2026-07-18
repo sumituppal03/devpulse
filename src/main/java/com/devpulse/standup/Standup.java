@@ -33,6 +33,17 @@ public class Standup {
     @Column(name = "generated_content", nullable = false, columnDefinition = "TEXT")
     private String generatedContent;
 
+    // The developer's edited version. NULL until PUT /standup/{id}/finalize is called.
+    // This is what gets posted to Slack. Keeping both versions lets us
+    // compute edit_distance as a product quality metric.
+    @Column(name = "final_content", columnDefinition = "TEXT")
+    private String finalContent;
+
+    // How many characters changed between generated and final content.
+    // Low value = AI was accurate. High value = prompts need improvement.
+    @Column(name = "edit_distance")
+    private Integer editDistance;
+
     @Column(name = "commits_used", nullable = false)
     private int commitsUsed;
 
@@ -54,5 +65,7 @@ public class Standup {
     public void updateContent(String generatedContent, int commitsUsed) {
         this.generatedContent = generatedContent;
         this.commitsUsed = commitsUsed;
+        this.finalContent = null;
+        this.editDistance = null;
     }
 }

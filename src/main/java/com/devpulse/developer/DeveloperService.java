@@ -5,6 +5,7 @@ import com.devpulse.developer.dto.DeveloperResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
+import java.util.List;
 import java.util.UUID;
 
 @Service
@@ -20,10 +21,19 @@ public class DeveloperService {
     }
 
     /**
-     * Fetches a developer AND verifies it belongs to the calling tenant.
-     * This single check is the actual multi-tenant security boundary —
-     * without it, any authenticated tenant could request data for ANY
-     * developer ID, not just their own.
+     * Returns all developers belonging to this tenant.
+     * Used by the dashboard to populate the developer list.
+     */
+    public List<DeveloperResponse> listByTenant(UUID tenantId) {
+        return developerRepository.findByTenantId(tenantId).stream()
+                .map(d -> new DeveloperResponse(d.getId(), d.getGithubUsername(), d.getTimezone()))
+                .toList();
+    }
+
+    /**
+     * Fetches a developer and verifies it belongs to the calling tenant.
+     * Returns 404 if the developer doesn't exist OR belongs to a different tenant —
+     * never reveals whether a resource exists to an unauthorized caller.
      */
     public Developer getOwnedByTenant(UUID developerId, UUID tenantId) {
         Developer developer = developerRepository.findById(developerId)

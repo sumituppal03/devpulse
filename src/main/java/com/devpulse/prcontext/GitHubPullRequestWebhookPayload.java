@@ -3,12 +3,6 @@ package com.devpulse.prcontext;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
-/**
- * GitHub's real pull_request webhook payload has dozens of fields.
- * @JsonIgnoreProperties(ignoreUnknown = true) means we only care about
- * the few we actually use — everything else is silently ignored rather
- * than throwing a parsing error.
- */
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record GitHubPullRequestWebhookPayload(
         String action,
@@ -16,7 +10,19 @@ public record GitHubPullRequestWebhookPayload(
         Repository repository
 ) {
     @JsonIgnoreProperties(ignoreUnknown = true)
-    public record PullRequest(int number, String title, String body) {}
+    public record PullRequest(
+            int number,
+            String title,
+            String body,
+            @JsonProperty("head") Head head
+    ) {}
+
+    /**
+     * The head object contains the branch name — this is what we parse for
+     * a Linear ticket ID. E.g. "feature/LIN-234-auth-refactor" → "LIN-234"
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record Head(String ref) {}
 
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record Repository(String name, Owner owner) {}

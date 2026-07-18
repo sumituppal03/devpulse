@@ -32,6 +32,8 @@ public class GitHubWebhookController {
             @RequestHeader("X-Hub-Signature-256") String signature,
             @RequestHeader("X-GitHub-Event") String eventType) throws IOException {
 
+        // Raw bytes — must be read before any parsing to preserve
+        // the exact bytes GitHub signed for HMAC verification
         String rawPayload = new String(request.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
 
         if (!signatureVerifier.isValid(rawPayload, signature)) {
@@ -39,7 +41,8 @@ public class GitHubWebhookController {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }
 
-        WebhookEvent event = webhookEventRepository.save(WebhookEvent.create("GITHUB", eventType, rawPayload));
+        WebhookEvent event = webhookEventRepository.save(
+                WebhookEvent.create("GITHUB", eventType, rawPayload));
         log.info("Logged GitHub webhook event: {} (id={})", eventType, event.getId());
 
         if ("pull_request".equals(eventType)) {
@@ -48,13 +51,19 @@ public class GitHubWebhookController {
                         objectMapper.readValue(rawPayload, GitHubPullRequestWebhookPayload.class);
 
                 if ("opened".equals(payload.action()) || "reopened".equals(payload.action())) {
+                    // Extract branch name for Linear ticket lookup
+                    String branchName = payload.pullRequest().head() != null
+                            ? payload.pullRequest().head().ref()
+                            : null;
+
                     prContextEnricherService.enrich(
                             event.getId(),
                             payload.repository().owner().login(),
                             payload.repository().name(),
                             payload.pullRequest().number(),
                             payload.pullRequest().title(),
-                            payload.pullRequest().body()
+                            payload.pullRequest().body(),
+                            branchName  // new — passed to LinearClient for ticket lookup
                     );
                 }
             } catch (Exception e) {
