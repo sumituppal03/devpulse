@@ -33,6 +33,12 @@ public class CodeIndexingService {
     private final RepositoryJpaRepository repositoryJpaRepository;
     private final PlatformTransactionManager transactionManager;
 
+    // Each unit of work (status flip, each batch save) commits in its own short
+    // transaction via TransactionTemplate, instead of wrapping the entire
+    // multi-minute GitHub-fetch + embedding job in one @Transactional method.
+    // Previously, a failure at the very end rolled back everything — including
+    // chunks saved minutes earlier — because nothing committed until the whole
+    // method returned. Now each batch is durable the moment it's written.
     @Async
     public void indexRepository(Repository repository) {
         log.info("Starting indexing for {}/{}", repository.getGithubOwner(), repository.getGithubRepo());
@@ -101,18 +107,6 @@ public class CodeIndexingService {
                 totalChunks += batch.size();
             }
 
-            // Rebuild the ivfflat index AFTER data is saved.
-            // Building ivfflat on an empty table (as migration V7 originally did)
-            // produces a degenerate index that always returns the same rows.
-            // Rebuilding here, on real data, gives meaningful similarity search.
-            try {
-                tx.executeWithoutResult(s -> codeChunkRepository.rebuildVectorIndex());
-                log.info("Vector index rebuilt successfully for {}/{}",
-                        repository.getGithubOwner(), repository.getGithubRepo());
-            } catch (Exception e) {
-                log.warn("Vector index rebuild failed — search quality may be degraded: {}", e.getMessage());
-            }
-
             int finalTotal = totalChunks;
             tx.executeWithoutResult(s -> {
                 repository.setIndexStatus("READY");
@@ -123,12 +117,35 @@ public class CodeIndexingService {
             log.info("Indexing complete for {}/{} — {} total chunks",
                     repository.getGithubOwner(), repository.getGithubRepo(), finalTotal);
 
+            // Rebuild the ivfflat vector index NOW that real data exists.
+            // This is the key step that fixes the "always returns same file" bug —
+            // the index created at migration time on an empty table is degenerate
+            // and must be dropped and recreated after data is loaded.
+            rebuildVectorIndex();
+
         } catch (Exception e) {
             log.error("Indexing failed for {}/{}", repository.getGithubOwner(), repository.getGithubRepo(), e);
             tx.executeWithoutResult(s -> {
                 repository.setIndexStatus("FAILED");
                 repositoryJpaRepository.save(repository);
             });
+        }
+    }
+
+    /**
+     * Drops and recreates the ivfflat index after data has been loaded.
+     * Called automatically at the end of every successful indexing run.
+     * Failure here is non-fatal — chunks are still queryable via sequential
+     * scan, just slower. A warning is logged so the issue is visible.
+     */
+    private void rebuildVectorIndex() {
+        try {
+            TransactionTemplate tx = new TransactionTemplate(transactionManager);
+            tx.executeWithoutResult(s -> codeChunkRepository.dropVectorIndex());
+            tx.executeWithoutResult(s -> codeChunkRepository.createVectorIndex());
+            log.info("Vector index rebuilt successfully — similarity search is now optimised");
+        } catch (Exception e) {
+            log.warn("Vector index rebuild failed — search quality may be degraded: {}", e.getMessage());
         }
     }
 
@@ -182,6 +199,11 @@ public class CodeIndexingService {
         return "config";
     }
 
+    /**
+     * Converts float[] to pgvector string "[0.12345,-0.67891,...]".
+     * Hibernate stores this as TEXT; PostgreSQL casts it to vector at query time
+     * via CAST(:embedding AS vector) in the native SQL similarity query.
+     */
     private String toVectorString(float[] vector) {
         StringBuilder sb = new StringBuilder("[");
         for (int i = 0; i < vector.length; i++) {
