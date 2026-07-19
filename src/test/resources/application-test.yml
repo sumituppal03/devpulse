@@ -1,10 +1,4 @@
 spring:
-  jpa:
-    hibernate:
-      ddl-auto: validate
-  flyway:
-    enabled: true
-    locations: classpath:db/migration
   data:
     redis:
       host: localhost
@@ -21,3 +15,6 @@ ollama:
 groq:
   api-key: test-key
   model-name: llama-3.3-70b-versatile
+
+linear:
+  api-key: test-linear-key
