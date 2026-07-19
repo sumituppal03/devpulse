@@ -1,52 +1,76 @@
 # ⚡ DevPulse
 
-> An AI-powered engineering intelligence platform with two distinct features: an authenticated, multi-tenant standup generator grounded in real GitHub activity, and a webhook-driven PR context enricher that posts AI-generated explanations directly onto pull requests. Dual-provider AI, Redis-backed rate limiting, and a real audit trail tracking exactly what every LLM call cost in time and tokens.
+> A multi-tenant AI platform that automates three things engineering teams do manually every day: writing standups, explaining pull requests, and answering questions about their own codebase. Three distinct architectural patterns, one deployed system.
 
 [![Java](https://img.shields.io/badge/Java-25-orange?logo=openjdk)](https://openjdk.org/)
-[![Spring Boot](https://img.shields.io/badge/Spring_Boot-3.5.15-brightgreen?logo=spring)](https://spring.io/projects/spring-boot)
+[![Spring Boot](https://img.shields.io/badge/Spring_Boot-3.5.x-brightgreen?logo=spring)](https://spring.io/projects/spring-boot)
 [![LangChain4j](https://img.shields.io/badge/LangChain4j-1.16.3-blueviolet)](https://github.com/langchain4j/langchain4j)
 [![Redis](https://img.shields.io/badge/Redis-7-red?logo=redis)](https://redis.io/)
+[![PGVector](https://img.shields.io/badge/PGVector-0.8-blue)](https://github.com/pgvector/pgvector)
 [![Docker](https://img.shields.io/badge/Docker-ready-blue?logo=docker)](https://hub.docker.com/)
 [![Live Demo](https://img.shields.io/badge/Live-Render-46E3B7?logo=render)](https://devpulse-ohby.onrender.com)
+[![Tests](https://img.shields.io/badge/Tests-33%20passing-success)](https://github.com/sumituppal03/devpulse)
 
 ---
 
-## The Problem
-
-Engineering teams lose real time to two specific, mechanical daily tasks:
-
-**Standup prep** — 10-15 minutes per developer reconstructing yesterday's work from memory.
-**PR review context** — reviewers asking "what ticket is this for?" and "why this approach?" before review can even begin.
-
-DevPulse automates both, grounded in real GitHub data — not a blank chat window guessing at context it was never given.
+## What It Does
 
 ```
-No commits today  →  "No commits found for this date." (the LLM is never even called)
-A PR opens         →  An AI-generated context comment appears within seconds, automatically
-Too many requests  →  429 Too Many Requests  (Redis enforces the limit, atomically)
+Developer registers with company API key
+         │
+         ├── Standup Generator
+         │   GET /api/v1/standup/generate
+         │   Fetches commits from ALL company repos → AI writes standup in your voice
+         │   No commits? Returns "No commits found" — LLM never called
+         │   Finalize → posts to Slack automatically
+         │
+         ├── PR Context Enricher
+         │   GitHub webhook fires when PR opens
+         │   Fetches diff + Linear ticket from branch name → AI posts context comment
+         │   Returns 200 immediately, processes async — no GitHub timeouts
+         │
+         └── Codebase Q&A
+             POST /api/v1/codeqa/ask
+             Indexes your repos into PGVector → answer questions with file citations
+             Answers from real code only — never invents
 ```
 
 ---
 
-## Three Architectural Patterns, One System
+## Three Features, Three Architectural Patterns
 
-| | Standup Generator | PR Context Enricher | Rate Limiting |
+| | Standup Generator | PR Context Enricher | Codebase Q&A |
 |---|---|---|---|
-| **Trigger** | Authenticated API call | GitHub webhook | Every standup request |
-| **Auth model** | Split-key API authentication | HMAC-SHA256 signature | Tenant-scoped Redis counter |
-| **Processing** | Synchronous | Asynchronous (`@Async`) | Atomic Redis `INCR` |
-| **Output** | JSON standup summary | GitHub PR comment | `429` when limit exceeded |
-| **Storage** | PostgreSQL + audit log | PostgreSQL + audit log | Redis (auto-expires after window) |
+| **Trigger** | Authenticated API call | GitHub webhook (HMAC-SHA256) | Authenticated API call |
+| **Processing** | Synchronous | Asynchronous (`@Async`) | Synchronous |
+| **AI input** | GitHub commits + style sample | PR diff + Linear ticket | PGVector similarity search |
+| **Output** | Standup summary → Slack | GitHub PR comment | Answer + file citations |
+| **Hallucination guard** | Empty commits → early return | GitHub failure → error log | No chunks → early return |
 
 ---
 
 ## What Makes This Different
 
-1. **No-hallucination guardrail** — empty commit list → early return, LLM never called. Enforced by a unit test, not just a prompt instruction.
-2. **Dual-provider AI** — Ollama locally, Groq in production. One Spring profile flag switches it. Zero code changes.
-3. **Redis-backed rate limiting** — `INCR` + `EXPIRE` on a per-tenant key. Atomic, fast, self-resetting after the window. Proven under concurrent load (parallel requests, mixed `200`/`429` responses verified).
-4. **Idempotent webhook handling** — duplicate GitHub webhook deliveries never double-post a comment or double-call the LLM.
-5. **Honest architectural self-assessment** — see [`ARCHITECTURE.md`](./ARCHITECTURE.md) for what's genuinely production-grade versus intentionally simplified.
+**1. No-hallucination is a code constraint, not a prompt instruction**
+Empty data → early return. LLM never called. Verified by `verify(chatModel, never()).chat(...)` in the test suite. If someone removes the guard, the test fails loudly.
+
+**2. Dual-provider AI with zero code changes**
+Ollama locally (free, ~45s), Groq in production (~1.5s). One Spring profile flag. Same `ChatModel` interface for both. Measured from real `llm_calls` audit data, not estimates.
+
+**3. Multi-repo standup generation**
+A company registers all their GitHub repos once. Standup generation automatically fetches commits across ALL of them — the developer never specifies which repo. This is how it should work when a team works across multiple services.
+
+**4. Linear ticket context in PR comments**
+Branch name `feature/LIN-234-auth-refactor` → fetches the actual Linear ticket → adds business WHY to the AI comment alongside the technical WHAT from the diff.
+
+**5. Slack delivery after finalize**
+Developer reviews and edits the AI standup. Clicks finalize. Standup posts to the team's Slack channel automatically. Edit distance is tracked as a product quality metric.
+
+**6. Idempotent webhook handling**
+GitHub redelivers webhooks on timeouts — documented platform behavior. Existence check before processing means duplicate delivery never causes a second comment or second LLM call. Verified by unit test.
+
+**7. Redis rate limiting tested under real concurrency**
+11 parallel requests, `Start-Job` in PowerShell, fired simultaneously. Confirmed mixed `200`/`429` responses in a single run. Not theory — verified behavior.
 
 ---
 
@@ -54,200 +78,212 @@ Too many requests  →  429 Too Many Requests  (Redis enforces the limit, atomic
 
 | Layer | Technology | Why |
 |---|---|---|
-| Runtime | Java 25 + Spring Boot 3.5.15 | Latest LTS, modern records |
-| Database (prod) | PostgreSQL via Neon | Free tier, no expiry |
-| Database (local) | PostgreSQL via Docker Compose | Identical engine to production |
-| Cache & Rate Limit | Redis 7 (Render free tier in prod, Docker locally) | Atomic `INCR` for per-tenant counters |
-| AI orchestration | LangChain4j 1.16.3 | Mature chat/RAG abstractions, rare in Java ecosystem |
-| AI provider (dev) | Ollama + Llama 3.2 | Free, fully local |
+| Runtime | Java 25 + Spring Boot 3.5.x | Modern records, latest LTS |
+| AI orchestration | LangChain4j 1.16.3 | Rare in Java ecosystem — mature chat + RAG abstractions |
+| AI provider (dev) | Ollama + Llama 3.2 | Free, fully local, no API key needed |
 | AI provider (prod) | Groq + Llama 3.3 70B | ~30x faster than local CPU inference |
-| Auth (API) | Spring Security + split-key auth | BCrypt-safe lookup |
-| Auth (webhook) | HMAC-SHA256 signature verification | Proves webhook genuinely came from GitHub |
-| API Docs | springdoc-openapi + Swagger UI | Interactive, testable docs |
-| Migrations | Flyway | Every schema change versioned |
-| Container | Multi-stage Docker (JDK → JRE) | Minimal runtime image |
-| Testing | JUnit 5, Mockito, AssertJ, MockRestServiceServer | Zero live network/LLM calls |
-| Deployment | Render | Live at `devpulse-ohby.onrender.com` |
+| Vector search | PostgreSQL + pgvector | Cosine similarity, ivfflat index, same DB as everything else |
+| Embeddings | nomic-embed-text (Ollama) | 768 dimensions, free, runs locally |
+| Database | PostgreSQL via Neon (prod) / Docker (local) | Real engine in both environments |
+| Cache + Rate limit | Redis 7 | Atomic `INCR` + `EXPIRE` for per-tenant counters |
+| Auth (API) | Spring Security + split-key BCrypt | Fast indexed lookup + BCrypt verify |
+| Auth (webhook) | HMAC-SHA256 constant-time comparison | Prevents timing attacks on signature guessing |
+| Integrations | Slack Incoming Webhooks, Linear GraphQL API | Per-tenant configuration |
+| Schema migrations | Flyway | Every change versioned, reproducible across environments |
+| Container | Multi-stage Docker (JDK build → JRE runtime) | Minimal production image |
+| Testing | JUnit 5, Mockito, AssertJ, Testcontainers | 33 tests, zero live network calls in unit tests |
+| CI/CD | GitHub Actions + Render auto-deploy | Push to main → live in ~3 minutes |
 
 ---
 
-## Try It — Interactive API Docs
+## Live Demo
 
-**`https://devpulse-ohby.onrender.com/swagger-ui.html`**
+**Swagger UI:** `https://devpulse-ohby.onrender.com/swagger-ui.html`
+**Health:** `https://devpulse-ohby.onrender.com/actuator/health`
 
-Every endpoint documented with real schemas, plus an **Authorize** button — register a tenant, paste your generated key, call protected endpoints directly in the browser.
-
----
-
-## API Reference
-
-> **Every ID and secret shown below is a placeholder.** There is no shared or demo credential — each tenant generates their own by calling these endpoints.
-
-### 1. Register a Tenant (Public)
-
-```http
-POST /api/v1/tenants/register
-{ "name": "Your Company Name" }
-```
-
-```json
-{
-  "tenantId": "<a-new-uuid-generated-for-you>",
-  "name": "Your Company Name",
-  "apiKey": "dp_live_<unique-to-you>.<unique-to-you>",
-  "warning": "Save this API key now. It will not be shown again."
-}
-```
-
-### 2. Register a Developer (Authenticated)
-
-```http
-POST /api/v1/developers
-Authorization: Bearer <your-own-apiKey>
-{ "githubUsername": "<your-github-username>" }
-```
-
-### 3. Generate a Standup (Authenticated, Rate Limited)
-
-```http
-GET /api/v1/standup/generate?developerId=<your-developerId>&owner=<org>&repo=<repo>&date=<optional-YYYY-MM-DD>
-Authorization: Bearer <your-own-apiKey>
-```
-
-Returns `429 Too Many Requests` after 10 calls within a 60-second window per tenant. The counter is stored in Redis, resets automatically when the window expires.
-
-### 4. PR Context Enrichment (Webhook-Driven)
-
-Configure a GitHub webhook on your repository pointing at:
-```
-POST https://devpulse-ohby.onrender.com/webhooks/github
-```
-
-Content type: `application/json`, event: **Pull requests**, secret: a value you choose yourself (must match `GITHUB_WEBHOOK_SECRET` on your server). Opening a PR produces an AI-generated context comment automatically within seconds — no further action needed.
+> Render free tier — first request after 15 minutes idle takes 30-60 seconds.
 
 ---
 
-## Quick Start
-
-### Docker Compose (local dev, Ollama)
+## Quick Start (Local, Free, No API Keys Needed)
 
 ```bash
 git clone https://github.com/sumituppal03/devpulse.git
 cd devpulse
 
-docker-compose up -d        # starts PostgreSQL + Redis
+# Start PostgreSQL (pgvector) + Redis
+docker-compose up -d
 
-# Install Ollama: https://ollama.com
+# Pull the AI models (free, runs on your laptop)
 ollama pull llama3.2
+ollama pull nomic-embed-text
 
 export GITHUB_TOKEN=<your-github-pat>
-export GITHUB_WEBHOOK_SECRET=<a-secret-you-invent>
+export GITHUB_WEBHOOK_SECRET=<a-string-you-invent>
 
 ./mvnw spring-boot:run
 ```
 
-### Run Against Groq (prod profile)
+Open `http://localhost:8080/swagger-ui.html` — everything is interactive from there.
+
+### With Groq (production-speed inference)
 
 ```bash
 export GROQ_API_KEY=<your-groq-key>
 ./mvnw spring-boot:run "-Dspring-boot.run.profiles=prod"
 ```
 
-### Environment Variables
+---
+
+## API Reference
+
+### Company Setup (do this once)
+
+```http
+# 1. Register your company
+POST /api/v1/tenants/register
+{"name": "Acme Corp"}
+→ returns dp_live_xxx.yyy  ← save this, shown once only
+
+# 2. Register your GitHub repos
+POST /api/v1/repos
+Authorization: Bearer dp_live_xxx.yyy
+{"githubOwner": "your-org", "githubRepo": "backend", "defaultBranch": "main"}
+
+# 3. Index a repo for codebase Q&A
+POST /api/v1/repos/{repositoryId}/index
+Authorization: Bearer dp_live_xxx.yyy
+→ runs in background, check status at GET /api/v1/repos/{id}/index/status
+
+# 4. Configure Slack (sends a test message first)
+POST /api/v1/integrations/slack
+Authorization: Bearer dp_live_xxx.yyy
+{"webhookUrl": "https://hooks.slack.com/services/..."}
+
+# 5. Configure Linear
+POST /api/v1/integrations/linear
+Authorization: Bearer dp_live_xxx.yyy
+{"apiKey": "lin_api_..."}
+```
+
+### Developer Daily Flow
+
+```http
+# Register yourself (use the company API key)
+POST /api/v1/developers
+Authorization: Bearer dp_live_xxx.yyy
+{"githubUsername": "your-github-username"}
+
+# Generate today's standup (auto-fetches all company repos)
+GET /api/v1/standup/generate?developerId={uuid}
+Authorization: Bearer dp_live_xxx.yyy
+→ 429 after 10 requests/minute per tenant
+
+# Finalize (posts to Slack if configured)
+PUT /api/v1/standup/{id}/finalize
+Authorization: Bearer dp_live_xxx.yyy
+{"content": "edited standup text here"}
+
+# View history
+GET /api/v1/standup/history?developerId={uuid}&days=7
+Authorization: Bearer dp_live_xxx.yyy
+
+# Ask a codebase question
+POST /api/v1/codeqa/ask
+Authorization: Bearer dp_live_xxx.yyy
+{"repositoryId": "{uuid}", "question": "How does authentication work?"}
+```
+
+### PR Context (zero configuration after webhook setup)
+
+```
+Configure webhook at: https://devpulse-ohby.onrender.com/webhooks/github
+Event: Pull requests
+Content type: application/json
+Secret: your GITHUB_WEBHOOK_SECRET value
+
+Open a PR → AI comment appears automatically within seconds.
+Branch named feature/LIN-234-something → Linear ticket context included automatically.
+```
+
+---
+
+## Environment Variables
 
 | Variable | Description | Required |
 |---|---|---|
-| `SPRING_DATASOURCE_URL` | JDBC connection string | ✅ |
-| `SPRING_DATASOURCE_USERNAME` | Database user | ✅ |
-| `SPRING_DATASOURCE_PASSWORD` | Database password | ✅ |
-| `SPRING_DATA_REDIS_HOST` | Redis hostname | ✅ |
-| `SPRING_DATA_REDIS_PORT` | Redis port (default: 6379) | ✅ |
-| `GITHUB_TOKEN` | GitHub PAT with `repo` scope | ✅ |
-| `GITHUB_WEBHOOK_SECRET` | Webhook HMAC secret | ✅ |
-| `GROQ_API_KEY` | Groq Cloud API key | Only if `prod` profile |
+| `SPRING_DATASOURCE_URL` | PostgreSQL JDBC URL | Yes |
+| `SPRING_DATASOURCE_USERNAME` | Database user | Yes |
+| `SPRING_DATASOURCE_PASSWORD` | Database password | Yes |
+| `SPRING_DATA_REDIS_HOST` | Redis hostname only (no redis:// prefix) | Yes |
+| `SPRING_DATA_REDIS_PORT` | Redis port (default 6379) | Yes |
+| `GITHUB_TOKEN` | GitHub PAT with `repo` scope | Yes |
+| `GITHUB_WEBHOOK_SECRET` | Webhook HMAC signing secret | Yes |
+| `GROQ_API_KEY` | Groq Cloud API key | Only with `prod` profile |
 | `SPRING_PROFILES_ACTIVE` | Set to `prod` for Groq | Optional |
 
 ---
 
-## Run the Tests
+## Tests
 
 ```bash
 ./mvnw clean test
 ```
 
 ```
-Tests run: 18, Failures: 0, Errors: 0
+Tests run: 33, Failures: 0, Errors: 0
 ```
 
-**What's verified:**
-- API key security — plaintext returned once, hash stored only
-- GitHub JSON parsing — empty results return empty list, never `null`
-- **No-hallucination guarantee** — LLM never called on empty commit input
-- **Webhook signature verification** — tampered payloads and wrong secrets rejected
-- **PR enrichment idempotency** — duplicate webhook never double-posts
-- **Failure handling** — GitHub API failure captured in audit trail, not silently lost
-- **Rate limiter under limit** — `isAllowed()` returns `true` for count ≤ 10
-- **Rate limiter over limit** — `isAllowed()` returns `false` for count > 10
+What's verified:
+- API key security — hash stored only, plaintext returned once and never again
+- No-hallucination guarantee — LLM never called on empty commit data
+- Webhook signature verification — tampered payloads and wrong secrets rejected
+- PR enrichment idempotency — duplicate webhook never double-posts
+- GitHub API failure — captured in audit trail, nothing partial persisted
+- Rate limiter correctness — under and over limit both verified
+- Slack integration — broken webhook URL rejected before saving
+- Linear integration — all early-exit paths verified without live API calls
+- Context loads — full Spring context wires correctly via Testcontainers
 
 ---
 
-## Architecture
+## Performance (Measured From llm_calls Audit Table)
 
-For the full system diagram, both feature workflows, the database schema, and an honest assessment of what's production-grade versus simplified — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
-
-**Short version:** authenticated clients hit the Standup Generator synchronously through a Redis rate limiter; GitHub pushes to the PR Context Enricher asynchronously via signed webhook. Both share `GitHubClient`, the dual-provider AI config, and the `llm_calls` audit table. Redis handles per-tenant rate limiting with atomic counters that auto-expire.
-
----
-
-## Real Measured Performance
-
-From the `llm_calls` audit table — not estimates:
-
-| Provider | Model | Typical Latency |
+| Provider | Model | Latency |
 |---|---|---|
-| Ollama (local CPU) | llama3.2 | ~44.7 seconds |
-| Groq (cloud) | llama-3.3-70b-versatile | ~1.0–1.5 seconds |
+| Ollama (local CPU) | llama3.2 | ~44,700ms |
+| Groq (cloud) | llama-3.3-70b-versatile | ~933–1,492ms |
 
-Rate limiter latency (Redis `INCR`): sub-millisecond, adds no perceptible overhead to requests.
-
----
-
-## Design Decisions
-
-- [`BUSINESS.md`](./BUSINESS.md) — reasoning behind every individual decision
-- [`ARCHITECTURE.md`](./ARCHITECTURE.md) — system diagrams, workflows, honest gap analysis
+Redis INCR latency: sub-millisecond. No perceptible overhead on standup requests.
 
 ---
 
 ## Known Limitations
 
-**No repository-to-tenant mapping** — PR Context Enrichment runs on a single shared repository with no tenant scoping. The most significant honest gap; full reasoning in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+**No durable queue** — webhook processing uses Spring `@Async`. A crash mid-enrichment loses that job. SQS or RabbitMQ is the documented next step.
 
-**No durable queue** — webhook processing uses Spring `@Async` (in-memory thread pool). A crash mid-enrichment loses that job.
+**Chunking quality** — codebase Q&A uses line-based chunking. Class/method boundary chunking would improve retrieval accuracy for code-specific questions.
 
-**Render free tier cold start** — 30–60 seconds after 15 minutes idle.
+**Render free tier cold start** — 30-60 seconds after 15 minutes idle.
 
-**No Linear/Jira/Slack integration** — PR context generated from PR title, description, and diff only.
+See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for full gap analysis.
 
 ---
 
 ## Roadmap
 
-- [ ] Repository-to-tenant mapping via GitHub App installation
-- [ ] Durable queue (SQS/RabbitMQ) for webhook processing reliability
-- [ ] Codebase Q&A via RAG (PGVector)
-- [ ] Standup edit-distance tracking
-- [ ] Linear/Jira ticket context for PR enrichment
+- [ ] Durable queue for webhook processing reliability
+- [ ] Class/method boundary chunking for better Q&A retrieval
+- [ ] GitHub App installation model for proper per-tenant webhook routing
+- [ ] VS Code extension — standup and Q&A without leaving the editor
+- [ ] Stripe billing — free tier + team plan
 
 ---
 
-## Live Demo
+## Design Decisions
 
-API: **`https://devpulse-ohby.onrender.com`**
-Swagger UI: **`https://devpulse-ohby.onrender.com/swagger-ui.html`**
-Health: **`https://devpulse-ohby.onrender.com/actuator/health`**
-
-> Free tier — allow 30–60 seconds on first request after idle.
+Every non-obvious decision documented with its reasoning in [`BUSINESS.md`](./BUSINESS.md).
+Full system architecture in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ---
 
@@ -256,13 +292,6 @@ Health: **`https://devpulse-ohby.onrender.com/actuator/health`**
 **Sumit Uppal** — Backend Engineer
 [GitHub](https://github.com/sumituppal03) · [LinkedIn](https://www.linkedin.com/in/sumit-uppal03/)
 
-## Table of Contents
-
-- [The Problem](#the-problem)
-- [Two Features, Two Architectural Patterns](#two-features-two-architectural-patterns)
-- [Live Demo](#live-demo)
-- [Author](#author)
-
 ---
 
-*Two live AI features, Redis-backed rate limiting, 18 tests passing. See [`BUSINESS.md`](./BUSINESS.md) for the full decision log.*
+*Three live AI features. 33 tests passing. Every gap documented honestly.*

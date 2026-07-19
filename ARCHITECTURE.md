@@ -1,221 +1,437 @@
-# 🏗️ Architecture
+# Architecture
 
-> System structure, data flow, and database schema for both features — followed by an honest engineering assessment of what's production-grade versus intentionally simplified.
-
----
-
-## System Components
-
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                              CLIENTS                                  │
-│   Authenticated API callers          GitHub (webhook sender)          │
-└───────────────┬─────────────────────────────────┬─────────────────────┘
-                │ Bearer token                     │ HMAC-SHA256 signed
-                ▼                                   ▼
-┌───────────────────────────┐         ┌───────────────────────────────┐
-│ ApiKeyAuthenticationFilter │         │  GitHubWebhookSignatureVerifier│
-│  (keyId lookup + BCrypt)   │         │   (constant-time HMAC check)   │
-└───────────────┬────────────┘         └───────────────┬────────────────┘
-                ▼                                       ▼
-┌───────────────────────────┐         ┌───────────────────────────────┐
-│      tenant/ feature       │         │   prcontext/ feature           │
-│  TenantController           │         │  GitHubWebhookController       │
-│  DeveloperController        │         │  PrContextEnricherService      │
-│  StandupController          │         │   (runs @Async)                │
-└───────────────┬────────────┘         └───────────────┬────────────────┘
-                │                                       │
-                └───────────────┬───────────────────────┘
-                                ▼
-                ┌───────────────────────────────┐
-                │   shared/ (reused by both)      │
-                │  GitHubClient                   │
-                │  ChatModelConfig (Ollama/Groq)  │
-                │  ActiveModelInfo                │
-                │  LlmCallRepository (audit log)  │
-                └───────────────┬───────────────────┘
-                                ▼
-                ┌───────────────────────────────┐
-                │         PostgreSQL (Neon)        │
-                │  tenants · developers            │
-                │  standups · llm_calls            │
-                │  webhook_events · pr_enrichments │
-                └───────────────────────────────┘
-```
-
-**Why two separate entry paths into the same shared infrastructure:** the two features have fundamentally different trigger models — one is called by an authenticated tenant, the other is pushed by GitHub itself — but both ultimately need the same GitHub API access and the same AI provider access. Centralizing those in `shared/` means a fix or improvement to either benefits both features automatically.
+> System structure, data flows, database schema, and honest gap analysis for all three features.
 
 ---
 
-## Workflow 1: Standup Generation (Synchronous, Pull-Based)
+## System Overview
 
 ```
-1. Client sends GET /api/v1/standup/generate
-   with Authorization: Bearer <apiKey> and a developerId
-                │
-                ▼
-2. ApiKeyAuthenticationFilter
-   - Parses "Bearer dp_live_{keyId}.{secret}"
-   - Looks up tenant by keyId (fast, indexed)
-   - Verifies secret against stored BCrypt hash
-   - Sets the authenticated tenantId in the security context
-                │
-                ▼
-3. StandupController
-   - Reads tenantId from the security context (not from the request — untrusted)
-   - Calls DeveloperService.getOwnedByTenant(developerId, tenantId)
-   - If the developer doesn't exist OR belongs to a different tenant → 404, stop here
-                │
-                ▼
-4. GitHubClient.fetchCommitsForDate(...)      → today's real commits
-   GitHubClient.fetchRecentCommits(...)       → a style sample of past commits
-                │
-                ▼
-5. StandupSummaryService.summarize(...)
-   - If today's commits are empty → return "No commits found for this date."
-     and STOP — the LLM is never called
-   - Otherwise: build a SystemMessage (rules) + UserMessage (style sample + commits)
-   - Call the active ChatModel (Ollama locally, Groq in prod)
-   - Record latency, token usage, and which model actually ran
-                │
-                ▼
-6. Persist to `standups` (upsert if one already exists for this developer+date)
-   Persist to `llm_calls` (the audit record)
-                │
-                ▼
-7. Return the summary as JSON to the client
+                    ┌──────────────────────────────────────────┐
+                    │            DevPulse Backend               │
+                    │      Java 25 + Spring Boot 3.5.x          │
+                    └──────────────┬───────────────────────────┘
+                                   │
+          ┌────────────────────────┼────────────────────────────┐
+          │                        │                            │
+  ┌───────▼───────┐      ┌────────▼────────┐        ┌─────────▼────────┐
+  │   Standup      │      │  PR Context     │        │  Codebase Q&A    │
+  │   Generator    │      │  Enricher       │        │  RAG Pipeline    │
+  │                │      │                 │        │                  │
+  │  Pull-based    │      │  Push-based     │        │  Pull-based      │
+  │  Synchronous   │      │  Asynchronous   │        │  Synchronous     │
+  └───────┬───────┘      └────────┬────────┘        └─────────┬────────┘
+          │                        │                            │
+          └────────────────────────┼────────────────────────────┘
+                                   │
+                    ┌──────────────▼──────────────┐
+                    │        shared/               │
+                    │  GitHubClient                │
+                    │  ChatModel (Ollama / Groq)   │
+                    │  EmbeddingModel (Ollama)      │
+                    │  ActiveModelInfo              │
+                    │  LlmCallRepository            │
+                    │  RateLimiterService (Redis)   │
+                    └──────────────┬──────────────┘
+                                   │
+               ┌───────────────────┼───────────────────┐
+               │                   │                   │
+       ┌───────▼───────┐  ┌────────▼──────┐  ┌────────▼──────┐
+       │  PostgreSQL    │  │    Redis 7     │  │  Groq / Ollama│
+       │  (Neon, prod)  │  │  Rate limits  │  │  LLM + Embed  │
+       │  PGVector ext  │  │  (in-memory)  │  │  inference    │
+       └───────────────┘  └───────────────┘  └───────────────┘
 ```
 
 ---
 
-## Workflow 2: PR Context Enrichment (Asynchronous, Push-Based)
+## Entry Points
+
+### Authenticated API requests
 
 ```
-1. A pull request is opened on a GitHub repository with the webhook configured
-                │
-                ▼
-2. GitHub sends POST /webhooks/github
-   with header X-Hub-Signature-256 and the raw JSON payload
-                │
-                ▼
-3. GitHubWebhookController
-   - Reads the raw request body as bytes (not via @RequestBody —
-     preserves the exact bytes GitHub actually signed)
-   - GitHubWebhookSignatureVerifier recomputes the HMAC and compares
-     using a constant-time check
-   - If invalid → 401, stop here
-   - If valid → save a WebhookEvent row, return 200 to GitHub immediately
-                │
-                ▼
-4. (Still within the same request, but @Async hands off to a background thread)
-   PrContextEnricherService.enrich(...)
-                │
-                ▼
-5. Idempotency check:
-   existsByGithubOwnerAndGithubRepoAndPrNumber(...)
-   - If this PR was already enriched (e.g. GitHub redelivered the webhook)
-     → mark the new WebhookEvent processed, do nothing further, STOP
-                │
-                ▼
-6. GitHubClient.fetchPullRequestFiles(...)   → the actual diff, up to 5 files
-                │
-                ▼
-7. Build a SystemMessage (rules: be brief, infer honestly, no invented reasons)
-   + UserMessage (PR title + description + diff)
-   Call the active ChatModel
-   Record latency, token usage, model name → `llm_calls`
-                │
-                ▼
-8. GitHubClient.postIssueComment(...)
-   → a real comment appears on the PR, prefixed "🤖 DevPulse Context"
-                │
-                ▼
-9. Persist to `pr_enrichments` (so step 5 can detect this PR next time)
-   Update the original WebhookEvent: processed = true, error_message = null
+Authorization: Bearer dp_live_{keyId}.{secret}
+         │
+         ▼
+ApiKeyAuthenticationFilter
+  1. Parse keyId from before the dot
+  2. SELECT * FROM tenants WHERE key_id = {keyId}  ← fast indexed lookup
+  3. BCrypt.verify(secret, stored_hash)             ← one BCrypt check
+  4. Set tenantId as Spring Security principal
+         │
+         ▼
+Controller reads tenantId from SecurityContextHolder
+(never from the request — caller cannot fake their tenant)
+```
 
-   If ANY step from 6-9 throws an exception:
-   → catch it, update the WebhookEvent: processed = false, error_message = <the actual error>
-   → nothing partial gets left in `pr_enrichments`
+### GitHub webhook requests
+
+```
+POST /webhooks/github
+X-Hub-Signature-256: sha256={signature}
+         │
+         ▼
+GitHubWebhookSignatureVerifier
+  1. Read raw request bytes (before any parsing)
+  2. Recompute HMAC-SHA256(webhook_secret, raw_bytes)
+  3. MessageDigest.isEqual(expected, actual)  ← constant-time, not String.equals()
+         │
+         ▼
+GitHubWebhookController
+  1. Store raw event to webhook_events
+  2. Return 200 to GitHub immediately
+  3. Kick off async processing via @Async
 ```
 
 ---
 
-## Data Model
+## Workflow 1: Standup Generation
 
 ```
-tenants                          developers
-├── id (PK)                      ├── id (PK)
-├── name                         ├── tenant_id (FK → tenants)
-├── key_id (unique, indexed)     ├── github_username
-├── api_key_hash                 ├── timezone
-├── plan                         └── created_at
-└── created_at                          │
-       │                                │
-       │         ┌──────────────────────┘
-       ▼         ▼
-   standups                          llm_calls
-   ├── id (PK)                       ├── id (PK)
-   ├── tenant_id (FK)                ├── tenant_id (FK, NULLABLE — see below)
-   ├── developer_id (FK)             ├── developer_id (FK, nullable)
-   ├── standup_date                  ├── feature ("STANDUP" | "PR_CONTEXT")
-   ├── generated_content             ├── model_name
-   ├── commits_used                  ├── prompt_tokens / completion_tokens
-   └── UNIQUE(developer_id, date)    ├── latency_ms
-                                     └── created_at
-
-webhook_events                   pr_enrichments
-├── id (PK)                      ├── id (PK)
-├── source                       ├── github_owner
-├── event_type                   ├── github_repo
-├── payload                      ├── pr_number
-├── processed                    ├── context_comment
-├── error_message                ├── github_comment_id
-└── received_at                  ├── created_at
-                                  └── UNIQUE(owner, repo, pr_number)
+GET /api/v1/standup/generate?developerId={uuid}&date={optional}
+         │
+         ▼
+1. Verify developer belongs to authenticated tenant
+   Wrong tenant or not found → 404 (reveals nothing)
+         │
+         ▼
+2. Check Redis rate limit
+   INCR ratelimit:standup:{tenantId}
+   count > 10 within 60 seconds → 429 Too Many Requests
+         │
+         ▼
+3. Load all repositories registered by this tenant
+   No repos registered → return helpful message, stop here
+         │
+         ▼
+4. Fetch commits from GitHub across all tenant repos:
+   fetchCommitsAcrossRepos() → today's commits (or specified date)
+   fetchRecentCommitsAcrossRepos() → last 20 commits for style sample
+   Individual repo failures are caught and skipped silently
+         │
+         ▼
+5. If todaysCommits.isEmpty() → return "No commits found for this date."
+   LLM is NEVER called — this is structural, not a prompt instruction
+         │
+         ▼
+6. StandupSummaryService.summarize(todaysCommits, styleSample)
+   SystemMessage: rules (be specific, match style, 3 bullets, past tense)
+   UserMessage: style sample + today's commits
+   chatModel.chat(system, user) → Ollama locally / Groq in prod
+         │
+         ▼
+7. Save LlmCall audit record (model name, tokens, latency)
+         │
+         ▼
+8. Upsert standup (update if exists for this developer+date, create if not)
+         │
+         ▼
+9. Return StandupResponse (summary, commitCount, commits)
 ```
 
-**The one deliberate inconsistency, visible directly in this schema:** `standups` and `developers` both carry a `tenant_id` foreign key with real ownership semantics. `webhook_events` and `pr_enrichments` carry **no tenant reference at all** — there's no tenant concept in that flow yet. `llm_calls.tenant_id` had to be made nullable specifically to accommodate this, rather than forcing a synthetic value into otherwise-honest audit data. This is explored in full below.
+### Finalize flow
+
+```
+PUT /api/v1/standup/{id}/finalize
+{"content": "edited text"}
+         │
+         ▼
+1. Verify standup belongs to authenticated tenant → 404 if not
+2. Compute edit distance (character-level approximation)
+3. Set final_content, edit_distance
+4. IntegrationService.postStandupToSlack() — non-fatal if Slack not configured
+5. Return editDistance, editPercent, postedToSlack
+```
 
 ---
 
-## Engineering Judgment: What's Solid, What's Simplified
+## Workflow 2: PR Context Enrichment
 
-### What's Genuinely Production-Grade
-
-**The security model.** Split-key API authentication and `404`-not-`403` tenant isolation are correct, defensible choices — the same patterns real API providers use, not simplified placeholders.
-
-**The no-hallucination guardrails.** Both the empty-commit-list check and the idempotency check are enforced in code and verified by tests — not just comments hoping the AI behaves.
-
-**Audit trail accuracy.** `llm_calls` correctly attributes which model actually ran, after a real bug (hardcoded model name) was found and fixed mid-development, with a regression test guarding against it recurring.
-
-**Webhook authenticity.** Constant-time HMAC comparison specifically guards against timing-based signature-guessing — a detail easy to skip, not skipped here.
-
-### The Most Significant Honest Gap: Two Tenancy Models
-
-The Standup Generator is fully multi-tenant. The PR Context Enricher has **none** — it runs against whatever single repository the webhook happens to be configured on, using one shared `GITHUB_TOKEN` and one shared `GITHUB_WEBHOOK_SECRET`.
-
-**Why:** a pull-based feature naturally carries tenant context, because the caller authenticates. A push-based GitHub webhook has no native concept of "which DevPulse tenant" it belongs to.
-
-**What a real fix requires:** either (a) per-tenant webhook secrets with a lookup table routing incoming webhooks to the correct tenant, or (b) migrating from a static Personal Access Token to a **GitHub App** installation — where GitHub itself tracks which installation, and therefore which tenant, a given webhook belongs to. GitHub Apps use JWT-based authentication rather than a static token, which is a meaningfully larger integration effort, not a quick patch.
-
-**The judgment call:** for a single-person portfolio project demonstrating two genuinely different integration patterns — authenticated pull APIs versus webhook-driven async processing — building both well on their own terms was the right scope. Claiming both are "fully multi-tenant" would not have been honest; this document says so directly instead of leaving it to be discovered.
-
-### What Would Need to Change for Real Production Scale
-
-**No durable queue.** `@Async` runs on Spring's in-memory thread pool. A crash mid-enrichment loses that job permanently — there's no retry beyond whatever GitHub itself attempts on delivery failure. A production system would use SQS, RabbitMQ, or Kafka here.
-
-**No rate limiting.** Neither feature throttles repeated calls, which matters once a metered LLM provider is involved at real volume.
-
-**No horizontal scaling story.** A second instance of this app would not coordinate with the first on `@Async` work — that requires a real distributed queue, not Spring's default executor.
-
-**Default connection pool sizing.** Never load-tested or deliberately tuned for this system's actual concurrency profile, unlike the explicit, justified HikariCP configuration in the companion wallet project.
-
-**Free-tier infrastructure ceilings.** Render's cold start and Neon's storage cap are appropriate, deliberate choices for a demo — and the first things to change, not re-architect, if this needed to run as a real product.
-
-### What This Judgment Is Meant to Demonstrate
-
-A system that states its own limits clearly is more trustworthy than one that hides them. The goal here isn't to claim DevPulse is production-scale — it isn't, yet, by design — but to show the difference between "this works" and "this is ready for production traffic" is understood and stated plainly, not discovered later by someone else.
+```
+GitHub opens PR → sends POST /webhooks/github
+         │
+         ▼
+1. Verify HMAC signature (constant-time) → 401 if invalid
+         │
+         ▼
+2. Persist WebhookEvent (raw payload, not yet processed)
+3. Return 200 to GitHub immediately ← critical, prevents redelivery
+         │
+         ▼ (background thread via @Async)
+4. Check idempotency:
+   EXISTS pr_enrichments WHERE owner+repo+pr_number = this PR?
+   Yes → mark event processed, return. No second comment, no second LLM call.
+         │
+         ▼
+5. Fetch PR diff from GitHub API
+         │
+         ▼
+6. Try Linear ticket lookup (best-effort):
+   Extract ticket ID from branch name regex [A-Z][A-Z0-9]+-\d+
+   Call Linear GraphQL API with tenant's configured API key
+   If no key configured or ticket not found → proceed without ticket context
+         │
+         ▼
+7. Generate context comment:
+   SystemMessage: "answer from diff + ticket context only, cite file paths"
+   UserMessage: PR title + description + Linear ticket (if found) + diff
+   chatModel.chat() → Ollama locally / Groq in prod
+         │
+         ▼
+8. POST comment to GitHub via GitHubClient.postIssueComment()
+9. Persist PrEnrichment record
+10. Save LlmCall audit record (null tenant_id — no authenticated tenant in webhook flow)
+11. Mark WebhookEvent processed
+```
 
 ---
 
-*See [`README.md`](./README.md) for what the system does and how to run it, and [`BUSINESS.md`](./BUSINESS.md) for the specific business reasoning behind each individual decision referenced above.*
+## Workflow 3: Codebase Q&A
+
+### Index phase (run once per repo, or after significant changes)
+
+```
+POST /api/v1/repos/{id}/index
+         │
+         ▼ (background thread via @Async)
+1. Mark repository status: INDEXING
+2. Delete all existing chunks for this repo (clean slate on re-index)
+         │
+         ▼
+3. GitHub: fetch repository git tree (recursive, all files)
+4. Filter: .java .kt .md .yml .yaml .properties
+   Skip: /target/ /build/ /node_modules/
+   Limit: 200 files
+         │
+         ▼
+5. For each file:
+   a. Fetch file content (base64 encoded)
+   b. Decode base64
+   c. Chunk into pieces ≤ 1500 characters
+      (YAML/MD: split at size boundary; Java/Kotlin: split at line groups)
+   d. For each chunk: embeddingModel.embed(chunkText)
+      → 768-dimensional float[] from nomic-embed-text
+   e. Convert float[] to pgvector string "[0.1,0.2,...]"
+   f. Batch save to code_chunks (10 at a time)
+         │
+         ▼
+6. Mark repository status: READY, set last_indexed_at
+         │
+         ▼
+7. Rebuild ivfflat vector index:
+   DROP INDEX IF EXISTS idx_code_chunks_embedding
+   CREATE INDEX idx_code_chunks_embedding
+     ON code_chunks USING ivfflat (embedding vector_cosine_ops)
+     WITH (lists = 100)
+   ← MUST happen after data exists. Built on empty table = degenerate index.
+```
+
+### Query phase
+
+```
+POST /api/v1/codeqa/ask
+{"repositoryId": "{uuid}", "question": "How does auth work?"}
+         │
+         ▼
+1. Verify repository belongs to authenticated tenant
+         │
+         ▼
+2. Embed the question: embeddingModel.embed(question) → 768-dim vector
+3. Convert to pgvector string
+         │
+         ▼
+4. Similarity search:
+   SELECT * FROM code_chunks
+   WHERE tenant_id = {tenantId} AND repository_id = {repositoryId}
+   ORDER BY embedding <=> CAST(:queryVector AS vector)
+   LIMIT 5
+   ← Filtered by BOTH tenant_id AND repository_id (cross-repo leakage is prevented)
+         │
+         ▼
+5. If no chunks found → return helpful message, LLM never called
+         │
+         ▼
+6. Build context: [file_path]\n{chunk_content} for each of the 5 chunks
+7. chatModel.chat(system, user) with grounded context
+   "Answer ONLY from context. If not enough context, say so."
+         │
+         ▼
+8. Return CodeQaResponse (answer, sourcesUsed, chunksRetrieved, groundedInCode)
+```
+
+---
+
+## Database Schema
+
+```sql
+tenants
+  id UUID PK
+  name VARCHAR
+  api_key_hash VARCHAR UNIQUE      -- BCrypt of secret portion
+  key_id VARCHAR UNIQUE            -- plaintext, indexed, for fast lookup
+  plan VARCHAR DEFAULT 'FREE'
+  created_at TIMESTAMPTZ
+
+developers
+  id UUID PK
+  tenant_id UUID FK → tenants
+  github_username VARCHAR
+  timezone VARCHAR DEFAULT 'UTC'
+  UNIQUE(tenant_id, github_username)
+
+repositories
+  id UUID PK
+  tenant_id UUID FK → tenants
+  github_owner VARCHAR
+  github_repo VARCHAR
+  default_branch VARCHAR DEFAULT 'main'
+  index_status VARCHAR DEFAULT 'PENDING'  -- PENDING/INDEXING/READY/FAILED
+  last_indexed_at TIMESTAMPTZ
+  UNIQUE(tenant_id, github_owner, github_repo)
+
+code_chunks
+  id UUID PK
+  tenant_id UUID FK → tenants
+  repository_id UUID FK → repositories
+  source_type VARCHAR          -- java/kotlin/markdown/yaml/config
+  file_path TEXT
+  content TEXT
+  embedding vector(768)        -- nomic-embed-text embeddings
+  embedding_model VARCHAR
+  indexed_at TIMESTAMPTZ
+  INDEX idx_code_chunks_tenant_id (tenant_id)
+  INDEX idx_code_chunks_embedding USING ivfflat(embedding vector_cosine_ops)
+
+standups
+  id UUID PK
+  tenant_id UUID FK → tenants
+  developer_id UUID FK → developers
+  standup_date DATE
+  generated_content TEXT       -- AI output
+  final_content TEXT           -- developer's edited version (NULL until finalized)
+  edit_distance INTEGER        -- character-level diff between generated and final
+  commits_used INTEGER
+  created_at TIMESTAMPTZ
+  UNIQUE(developer_id, standup_date)
+
+llm_calls
+  id UUID PK
+  tenant_id UUID               -- nullable: NULL for webhook-triggered calls
+  developer_id UUID
+  feature VARCHAR              -- STANDUP / PR_CONTEXT
+  model_name VARCHAR           -- actual model that ran (profile-scoped bean)
+  prompt_tokens INTEGER
+  completion_tokens INTEGER
+  latency_ms BIGINT
+  created_at TIMESTAMPTZ
+
+webhook_events
+  id UUID PK
+  source VARCHAR               -- GITHUB
+  event_type VARCHAR           -- pull_request
+  payload TEXT                 -- raw JSON from GitHub
+  processed BOOLEAN DEFAULT FALSE
+  error_message TEXT           -- set if processing failed
+  received_at TIMESTAMPTZ
+
+pr_enrichments
+  id UUID PK
+  github_owner VARCHAR
+  github_repo VARCHAR
+  pr_number INTEGER
+  context_comment TEXT
+  github_comment_id BIGINT
+  created_at TIMESTAMPTZ
+  UNIQUE(github_owner, github_repo, pr_number)  -- idempotency constraint
+
+integrations
+  id UUID PK
+  tenant_id UUID FK → tenants
+  integration_type VARCHAR     -- SLACK / LINEAR
+  config TEXT                  -- JSON: {"webhookUrl":"..."} or {"apiKey":"..."}
+  enabled BOOLEAN DEFAULT TRUE
+  created_at TIMESTAMPTZ
+  updated_at TIMESTAMPTZ
+  UNIQUE(tenant_id, integration_type)
+```
+
+---
+
+## AI Provider Configuration
+
+```
+Dev profile (default):
+  ChatModel  → OllamaChatModel   → localhost:11434 → llama3.2
+  EmbeddingModel → OllamaEmbeddingModel → nomic-embed-text
+
+Prod profile:
+  ChatModel  → OpenAiChatModel   → api.groq.com/openai/v1 → llama-3.3-70b-versatile
+  EmbeddingModel → OllamaEmbeddingModel → (same, embeddings always local)
+
+ActiveModelInfo (profile-scoped bean):
+  Dev:  "llama3.2"
+  Prod: "llama-3.3-70b-versatile"
+  → Written to llm_calls.model_name on every call
+  → This is what fixed the audit log bug where prod showed dev model name
+```
+
+---
+
+## Rate Limiting Design
+
+```
+On every GET /api/v1/standup/generate:
+
+  key = "ratelimit:standup:{tenantId}"
+  count = INCR key          ← atomic, no lock needed
+  if count == 1:
+    EXPIRE key 60           ← start 60-second window on first request
+  if count > 10:
+    return 429 Too Many Requests
+
+Window resets automatically when the Redis key expires.
+No cleanup job. No stale state.
+
+Tested with 11 parallel PowerShell background jobs:
+→ Confirmed mixed 200/429 responses in single run
+→ Confirms atomic accumulation under real concurrency
+```
+
+---
+
+## Honest Gap Analysis
+
+### Production-Grade
+
+- Multi-tenant data isolation (every query scoped by tenant_id)
+- Split-key BCrypt API authentication
+- HMAC-SHA256 webhook verification with constant-time comparison
+- Idempotent webhook processing
+- Dual AI provider with profile-scoped switching
+- Full LLM audit log (model, tokens, latency — every call)
+- Redis rate limiting tested under concurrent load
+- Flyway migrations (every schema change versioned)
+- Testcontainers integration tests (real PostgreSQL, not H2)
+- 33 unit tests, zero live network/LLM calls in unit tests
+
+### Intentionally Simplified (Documented Gaps)
+
+**No durable queue for webhook processing**
+Spring `@Async` uses an in-memory thread pool. JVM crash between webhook receipt and comment posting loses that job. `webhook_events` table records every incoming event for manual replay, but no automatic retry exists.
+*Fix: SQS, RabbitMQ, or any persistent queue.*
+
+**PR enrichment has no per-tenant GitHub connection**
+The system uses one shared `GITHUB_TOKEN` for all PR fetches and comment posts. GitHub webhooks carry no concept of "which DevPulse tenant does this repo belong to."
+*Fix: GitHub App installation model — each tenant installs the app, GitHub tracks the installation-to-tenant mapping, webhooks carry the installation ID.*
+
+**Line-based chunking for Q&A**
+Code is chunked by line groups, not by class or method boundaries. Semantically adjacent files in the same package can outscore each other for specific questions.
+*Fix: AST-based chunking that treats each method as a chunk.*
+
+**Integration credentials stored as plaintext JSON**
+Slack webhook URLs and Linear API keys in the `integrations` table are not encrypted at rest.
+*Fix: Column-level encryption or a secrets manager.*
+
+**Fixed-window rate limiting boundary**
+A tenant can fire 10 requests at the end of one window and 10 at the start of the next — 20 in 2 seconds. Acceptable at this scale.
+*Fix: Sliding-window counter using Redis sorted sets.*
