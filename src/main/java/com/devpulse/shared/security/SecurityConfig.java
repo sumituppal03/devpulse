@@ -55,7 +55,8 @@ public class SecurityConfig {
 
         config.setAllowedOrigins(List.of(
                 "http://localhost:3000",    // React dev server
-                "http://localhost:5173",    // Vite dev server
+                "http://localhost:5173",
+                "http://localhost:5174",     // Vite dev server
                 "https://devpulse.app",    // production domain (update when you have one)
                 "https://devpulse-ohby.onrender.com"  // Render deployment
         ));
